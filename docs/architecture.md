@@ -31,13 +31,15 @@ Implemented:
 - `Maankix.Endpoint.Service` — .NET 8 Worker Service that can run interactively or under Service Control Manager
 - Lightweight Clean Architecture folders inside the service
 - Dependency injection, `IConfiguration`, options validation, structured logging
-- Empty ports for later product work
+- Empty ports for later product work (except the filter port, which is now implemented)
 - Architecture decision records
 - `maankixflt` — Microsoft MiniSpy vendored as `src/Maankix.Endpoint.Driver` (see [driver.md](driver.md))
+- `MiniSpyDriverClient` — same protocol as MiniSpy.exe (`\MiniSpyPort`, `GetMiniSpyLog`)
 
 Not implemented (explicitly forbidden here):
 
-- Service-to-minifilter communication (the .NET host does not open `\MiniSpyPort`)
+- Policy model or enforcement
+- Blocking (`FLT_PREOP_COMPLETE` / access denied)
 - Policy model or enforcement
 - Backend protocol or REST
 - SQLite or any persistence
@@ -123,7 +125,7 @@ The following components are planned, not present. They are listed so later chec
 | Component | Intended home | Notes |
 | --- | --- | --- |
 | Minifilter driver | `src/Maankix.Endpoint.Driver` (`maankixflt`) | MiniSpy foundation; compile / load / unload only |
-| Filter port adapter | Infrastructure | Implements `IFilterCommunicationPort` — not written |
+| Filter port adapter | Infrastructure `MiniSpyDriverClient` | Implements `IDriverClient` / `IFilterCommunicationPort` |
 | Policy snapshot / evaluator | Domain + Application | No evaluator until a policy model exists |
 | Local store | Infrastructure | SQLite is a later decision; do not leak it into Domain |
 | Control-plane client | Infrastructure | Transport is a later decision |

@@ -38,15 +38,15 @@ flowchart TB
     end
 
     subgraph usermode [User mode this checkpoint]
-        SPY[minispy.exe Microsoft client]
-        SVC[Maankix.Endpoint.Service]
+        SVC[Maankix.Endpoint.Service MiniSpyDriverClient]
+        SPY[minispy.exe unused]
     end
 
-    FLT -->|"FltCreateCommunicationPort MiniSpyPort"| SPY
-    SVC -.->|"not connected"| FLT
+    FLT -->|"FilterConnectCommunicationPort MiniSpyPort"| SVC
+    SPY -.->|"replaced"| FLT
 ```
 
-The service still exposes an empty `IFilterCommunicationPort`. Nothing in .NET opens `\MiniSpyPort`.
+`MiniSpyDriverClient` uses the same MiniSpy protocol: connect to `\MiniSpyPort`, send `GetMiniSpyLog`, parse packed `LOG_RECORD`s, attach configured volumes (default `C:\`). The Worker logs `FILE_CREATE` / `FILE_READ` / `FILE_WRITE` / `FILE_CLOSE`. `minispy.exe` is not required. Only one client can connect (MiniSpy max 1).
 
 ```
 I/O request
@@ -55,7 +55,7 @@ I/O request
     → SpyPreOperationCallback      log, usually SUCCESS_WITH_CALLBACK
     → file system
     → SpyPostOperationCallback     complete the log record, queue it
-    → (optional) minispy.exe pulls records via the port
+    → MiniSpyDriverClient pulls records via GetMiniSpyLog
 ```
 
 MiniSpy never fails an I/O. Pre-operation returns `FLT_PREOP_SUCCESS_WITH_CALLBACK` or `FLT_PREOP_SUCCESS_NO_CALLBACK`. There is no deny path.

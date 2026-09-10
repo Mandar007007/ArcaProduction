@@ -97,13 +97,16 @@ Event Log source `Maankix Endpoint Service` is written to the Application log. C
 | --- | --- |
 | `Maankix:Endpoint:ServiceName` | Logical name used in structured logs |
 | `Maankix:Endpoint:ShutdownTimeout` | Generic-host stop timeout |
+| `Maankix:Driver:PortName` | Filter port (`\MiniSpyPort`) |
+| `Maankix:Driver:FilterName` | FltMgr name (`maankixflt`) |
+| `Maankix:Driver:AttachVolumes` | Volumes to attach after connect |
 | `Logging` | Log levels, console formatter, Event Log |
 
 User secrets id: `maankix-endpoint-service-0001`.
 
 ## Design principles
 
-SOLID, DRY, KISS, YAGNI, Clean Architecture, Clean Code, and Microsoft .NET Design Guidelines. Extensibility is preserved through empty ports (`IEndpointIdentity`, `IFilterCommunicationPort`, `IEndpointModule`) without speculative implementations.
+SOLID, DRY, KISS, YAGNI, Clean Architecture, Clean Code, and Microsoft .NET Design Guidelines. The service now implements MiniSpy's user-mode port protocol (`IDriverClient`). Policy, blocking, and backend remain out of scope.
 
 ## Minifilter
 
@@ -122,4 +125,4 @@ SOLID, DRY, KISS, YAGNI, Clean Architecture, Clean Code, and Microsoft .NET Desi
 
 ## Out of scope (this checkpoint)
 
-Service-to-driver communication, policies, backend, SQLite, REST, knowledge graph, and AI / behavior intelligence.
+Policies, blocking, backend, SQLite, REST, knowledge graph, and AI / behavior intelligence.

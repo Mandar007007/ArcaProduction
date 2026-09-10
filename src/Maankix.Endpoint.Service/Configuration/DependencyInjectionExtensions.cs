@@ -31,7 +31,7 @@ public static class DependencyInjectionExtensions
 
         AddDomain(services);
         AddApplication(services);
-        services.AddInfrastructure();
+        services.AddInfrastructure(configuration);
         services.AddEndpointWorker(configuration);
 
         return services;

@@ -1,0 +1,50 @@
+You are a senior Windows Kernel and Windows Service engineer.
+
+Current state:
+
+- We have Microsoft's MiniSpy driver integrated as maankixflt.
+- We have a .NET 8 Windows Worker Service called Maankix.Endpoint.Service.
+- They are completely disconnected.
+
+Objective:
+
+Replace the MiniSpy user application with our .NET service.
+
+Requirements:
+
+1. Study how Microsoft's MiniSpy user application connects to \\MiniSpyPort.
+
+2. Implement the exact same communication protocol inside Maankix.Endpoint.Service.
+
+3. Create a DriverClient component responsible for:
+   - Connecting to the communication port
+   - Receiving messages
+   - Parsing MiniSpy records
+   - Raising strongly typed C# events
+
+4. The Worker should subscribe to DriverClient events and log:
+
+FILE_CREATE
+FILE_READ
+FILE_WRITE
+FILE_CLOSE
+
+with full file path.
+
+5. Do NOT modify the driver's behavior.
+
+6. Do NOT implement policies.
+
+7. Do NOT implement blocking.
+
+8. Do NOT implement backend communication.
+
+9. Do NOT implement SQLite.
+
+10. Do NOT implement AI.
+
+Goal:
+
+Opening a file should result in the Windows Service logging the received event from the kernel.
+
+Use production-quality C# with dependency injection, cancellation tokens, structured logging, proper disposal, and clean architecture.
