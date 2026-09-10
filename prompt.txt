@@ -1,0 +1,151 @@
+You are a Principal Windows Security Architect with 20+ years of experience building enterprise endpoint security products such as Microsoft Defender, CrowdStrike Falcon Sensor, Tanium, and Symantec DLP.
+
+Your task is NOT to create a demo project.
+
+Your task is to bootstrap the repository of a production-grade Windows Endpoint Data Loss Prevention (DLP) platform called "Maankix".
+
+This codebase should remain maintainable for years.
+
+══════════════════════════════════
+PROJECT VISION
+══════════════════════════════════
+
+We are building an enterprise endpoint security platform.
+
+Architecture:
+
+Windows Kernel MiniFilter
+        ↓
+Windows Endpoint Service (.NET 8)
+        ↓
+Backend
+        ↓
+Knowledge Graph
+        ↓
+Behavior Intelligence
+
+This checkpoint ONLY creates the project foundation.
+
+Do NOT implement business logic.
+
+══════════════════════════════════
+OBJECTIVES
+══════════════════════════════════
+
+1. Create a professional repository structure.
+
+2. Create the Windows Service project using .NET 8 Worker Service.
+
+3. Enable:
+
+- Nullable Reference Types
+- Implicit Usings
+- XML Documentation
+- File Scoped Namespaces
+- Warnings As Errors
+
+4. Configure:
+
+- Dependency Injection
+- Structured Logging
+- appsettings.json
+- IConfiguration
+- Hosted Worker
+
+5. Organize the service using lightweight Clean Architecture.
+
+Folders:
+
+Domain/
+
+Application/
+
+Infrastructure/
+
+Worker/
+
+Configuration/
+
+Common/
+
+6. Domain must NOT reference Infrastructure.
+
+7. Infrastructure may reference Domain.
+
+8. Application may reference Domain.
+
+9. Program.cs must contain only composition root code.
+
+10. No business logic inside Program.cs.
+
+══════════════════════════════════
+CODING PRINCIPLES
+══════════════════════════════════
+
+Follow:
+
+SOLID
+
+DRY
+
+KISS
+
+YAGNI
+
+Clean Architecture
+
+Clean Code (Robert C. Martin)
+
+Microsoft .NET Design Guidelines
+
+Avoid overengineering while preserving extensibility.
+
+══════════════════════════════════
+OUTPUT
+══════════════════════════════════
+
+Generate:
+
+✔ Repository structure
+
+✔ .NET Worker Service
+
+✔ README
+
+✔ Architecture documentation
+
+✔ ADR-001
+
+✔ ADR-002
+
+✔ .editorconfig
+
+✔ Directory.Build.props
+
+✔ Solution file
+
+✔ Logging configuration
+
+✔ Dependency Injection configuration
+
+✔ Empty interfaces where appropriate
+
+✔ Proper namespaces
+
+Do NOT implement:
+
+Driver communication
+
+Policies
+
+Backend
+
+SQLite
+
+REST
+
+Graph
+
+AI
+
+Only create a production-ready foundation that a senior engineering team would accept as the first commit.

@@ -1,0 +1,29 @@
+<Project>
+  <!--
+    Stops the walk to the repo-root .NET Directory.Build.props.
+
+    Imports WDK / SDK C++ NuGet props when packages.config has been restored.
+    This is the Microsoft-supported way to compile without the WDK MSI
+    (blocked on some locked-down machines). Full WDK installs still work;
+    these Imports no-op when the packages folder is absent.
+  -->
+  <PropertyGroup>
+    <WdkNugetVersion>10.0.26100.6584</WdkNugetVersion>
+    <WdkPackagesDir>$(MSBuildThisFileDirectory)packages\</WdkPackagesDir>
+  </PropertyGroup>
+
+  <Import Project="$(WdkPackagesDir)Microsoft.Windows.SDK.CPP.$(WdkNugetVersion)\build\native\Microsoft.Windows.SDK.cpp.props"
+          Condition="Exists('$(WdkPackagesDir)Microsoft.Windows.SDK.CPP.$(WdkNugetVersion)\build\native\Microsoft.Windows.SDK.cpp.props')" />
+
+  <Import Project="$(WdkPackagesDir)Microsoft.Windows.SDK.CPP.x64.$(WdkNugetVersion)\build\native\Microsoft.Windows.SDK.cpp.x64.props"
+          Condition="Exists('$(WdkPackagesDir)Microsoft.Windows.SDK.CPP.x64.$(WdkNugetVersion)\build\native\Microsoft.Windows.SDK.cpp.x64.props') and '$(Platform)' == 'x64'" />
+
+  <Import Project="$(WdkPackagesDir)Microsoft.Windows.SDK.CPP.arm64.$(WdkNugetVersion)\build\native\Microsoft.Windows.SDK.cpp.arm64.props"
+          Condition="Exists('$(WdkPackagesDir)Microsoft.Windows.SDK.CPP.arm64.$(WdkNugetVersion)\build\native\Microsoft.Windows.SDK.cpp.arm64.props') and '$(Platform)' == 'ARM64'" />
+
+  <Import Project="$(WdkPackagesDir)Microsoft.Windows.WDK.x64.$(WdkNugetVersion)\build\native\Microsoft.Windows.WDK.x64.props"
+          Condition="Exists('$(WdkPackagesDir)Microsoft.Windows.WDK.x64.$(WdkNugetVersion)\build\native\Microsoft.Windows.WDK.x64.props') and '$(Platform)' == 'x64'" />
+
+  <Import Project="$(WdkPackagesDir)Microsoft.Windows.WDK.arm64.$(WdkNugetVersion)\build\native\Microsoft.Windows.WDK.arm64.props"
+          Condition="Exists('$(WdkPackagesDir)Microsoft.Windows.WDK.arm64.$(WdkNugetVersion)\build\native\Microsoft.Windows.WDK.arm64.props') and '$(Platform)' == 'ARM64'" />
+</Project>

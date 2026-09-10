@@ -1,0 +1,17 @@
+# Default
+* text=auto eol=crlf
+
+# Shell scripts keep LF for cross-platform tooling.
+*.sh text eol=lf
+
+# Solution files stay CRLF (Visual Studio).
+*.sln text eol=crlf
+
+# Binary
+*.dll binary
+*.exe binary
+*.pdb binary
+*.png binary
+*.jpg binary
+*.snupkg binary
+*.nupkg binary

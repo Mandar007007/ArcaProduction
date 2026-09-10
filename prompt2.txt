@@ -1,0 +1,70 @@
+You are a senior Windows Kernel Engineer specializing in File System MiniFilter drivers.
+
+We are NOT writing a driver from scratch.
+
+We are using Microsoft's official MiniSpy sample as the production foundation.
+
+Your task is to integrate MiniSpy into our solution without changing its behavior.
+
+Requirements
+
+1. Download or reference Microsoft's official MiniSpy sample.
+
+2. Copy it into
+
+src/
+    Maankix.Endpoint.Driver/
+
+3. Rename the project to
+
+maankixflt
+
+4. Rename solution/project names while preserving functionality.
+
+5. Keep every callback untouched.
+
+6. Do NOT remove comments that explain kernel behavior.
+
+7. Do NOT add new functionality.
+
+8. Ensure the driver compiles using the latest WDK.
+
+9. Create documentation explaining:
+
+- Folder structure
+- DriverEntry
+- Filter registration
+- Communication Port
+- Pre-operation callbacks
+- Post-operation callbacks
+- Instance lifecycle
+- Driver unload
+
+10. Explain which files are Microsoft's and which files are ours.
+
+11. Add architecture diagrams.
+
+12. Add a BUILD.md explaining exactly how to build the driver.
+
+13. Add a DEBUG.md explaining how to debug the driver with WinDbg.
+
+DO NOT
+
+Implement policies
+
+Implement backend
+
+Implement service communication
+
+Implement blocking
+
+Implement SQLite
+
+Implement AI
+
+The goal of this checkpoint is only:
+
+Compile
+Load
+Unload
+Understand
