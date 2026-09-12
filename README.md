@@ -1,128 +1,367 @@
-# Maankix
+<p align="center">
+  <img src="docs/assets/logo.png" alt="AkesoDLP" width="200">
+</p>
 
-Windows Endpoint Data Loss Prevention (DLP) platform.
+<h1 align="center">AkesoDLP</h1>
 
-This repository is the production foundation for the Maankix endpoint stack. The first checkpoint delivers the host, layering, build system, and documentation that a long-lived engineering team can extend. It does not implement product behavior.
+A proof-of-concept Data Loss Prevention (DLP) platform that detects, monitors, and prevents sensitive data from leaving an organization through endpoints, network channels, and data at rest.
 
-## Platform architecture
+Shares kernel driver infrastructure with AkesoEDR.
+
+---
+
+## What Is DLP?
+
+**Data Loss Prevention** (DLP) is a category of security tools that identify, monitor, and protect sensitive data — credit card numbers, social security numbers, intellectual property, medical records, source code — and enforce policies that control how that data moves across endpoints, networks, and storage.
+
+### Why DLP Matters
+
+Organizations generate and handle sensitive data constantly. Without DLP, that data flows freely — copied to USB drives, emailed to personal accounts, uploaded to cloud storage, pasted into chat applications. A single uncontrolled transfer can mean regulatory fines, intellectual property theft, or breach notification obligations.
+
+- **Content inspection.** DLP looks inside files and messages, not just at metadata. It uses regex patterns, keyword dictionaries, data identifiers with validation algorithms (Luhn for credit cards, MOD-97 for IBANs), file type detection by binary signature, and document fingerprinting to classify content.
+
+- **Policy enforcement.** Detection alone isn't enough. DLP enforces response actions — block the transfer, notify the user, require justification, quarantine the file — based on configurable policies with severity tiers and exception logic.
+
+- **Prevention, not just detection.** A minifilter driver intercepts file system operations *before* they complete. When a user copies a file containing 50 credit card numbers to a USB drive, the write is blocked before bytes reach the device. This is the same approach enterprise DLP vendors use in production.
+
+- **Visibility across channels.** Sensitive data leaves through many paths — USB drives, network shares, clipboard, browser uploads, email, printing. DLP monitors all of them with channel-specific interception mechanisms.
+
+### Who Uses DLP
+
+| Role | How They Use DLP |
+|------|------------------|
+| **Security Analyst** | Triages policy violations, investigates incidents, determines intent vs. accidental exposure |
+| **Compliance Officer** | Ensures regulatory requirements (PCI-DSS, HIPAA, GDPR, SOX) are enforced across data handling |
+| **IT Administrator** | Manages agent deployment, policy distribution, endpoint health monitoring |
+| **Incident Responder** | Reviews matched content, traces data movement, coordinates remediation |
+| **CISO / Risk Manager** | Uses reporting and risk scoring to understand organizational data exposure |
+
+### Why Build One?
+
+Understanding how DLP works at the implementation level — minifilter drivers, content inspection pipelines, policy evaluation engines, two-tier detection — reveals how enterprise data protection actually operates. AkesoDLP exists for exactly this purpose: a fully transparent, source-available DLP platform that security practitioners can study, modify, and experiment with.
+
+---
+
+## What It Does
+
+AkesoDLP inspects content across endpoints, network channels, and data at rest using a multi-technology detection engine and an enterprise-grade policy evaluation model.
+
+**Highlights:**
+
+- **Kernel-mode minifilter driver** intercepting file writes to USB/removable storage and network shares with true pre-operation blocking
+- **User-mode hooks** for clipboard monitoring (NtUserSetClipboardData) and browser upload interception (WinHttpSendRequest)
+- **Dual detection engines** — C++ agent (Hyperscan SIMD regex, Aho-Corasick keywords, native validators) and Python server (google-re2, pyahocorasick, full content extraction)
+- **10 validated data identifiers** with checksum/format validators: Credit Card (Luhn), SSN, IBAN (MOD-97), ABA Routing (3-7-1), Phone, Email, Passport, Driver's License, IPv4, Date of Birth
+- **Policy engine** with compound rules (AND), multiple rules (OR), exception conditions (entire-message and matched-component-only), severity tiers, and match count thresholds
+- **Two-Tier Detection (TTD)** — agent forwards to server for fingerprint matching and complex content extraction when local detection cannot evaluate
+- **Network monitor** — HTTP proxy (mitmproxy) and SMTP relay (aiosmtpd) with inline block/modify/redirect capability
+- **Document fingerprinting** via simhash for detecting full or partial content matches from indexed confidential documents
+- **Endpoint Discover** — scan endpoints for sensitive data at rest with incremental scanning and CPU throttling
+- **Message decomposition model** — content split into envelope, subject, body, and attachment components for targeted detection
+- **File content extraction** — PDF, Office (docx/xlsx/pptx), ZIP/TAR/7z archives with recursive extraction (max depth 3)
+- **6 built-in policy templates** — PCI-DSS, HIPAA, GDPR, SOX, Source Code Leakage, Confidential Documents
+- **React management console** with dark mode, policy editor, incident triage, agent management, and reporting
+- **AkesoSIEM integration** — emits structured DLP events for cross-product correlation with EDR, AV, and NDR telemetry
+- **Shared kernel driver infrastructure** with AkesoEDR — same minifilter framework, communication ports, service model, and build system
+
+---
+
+## Architecture
 
 ```
-Windows Kernel MiniFilter
-        ↓
-Windows Endpoint Service (.NET 8)
-        ↓
-Backend
-        ↓
-Knowledge Graph
-        ↓
-Behavior Intelligence
+┌─────────────────────────────────────────────────────────────────┐
+│                         KERNEL MODE                             │
+│                                                                 │
+│  akeso-dlp-driver.sys (minifilter)                           │
+│  ├── IRP_MJ_WRITE pre-op callback                               │
+│  │   → check volume type (removable? network share?)            │
+│  │   → send file path + first 4KB to user-mode via filter port  │
+│  │   → wait for verdict (ALLOW / BLOCK / SCAN_FULL)             │
+│  │   → BLOCK: FLT_PREOP_COMPLETE + STATUS_ACCESS_DENIED         │
+│  │   → ALLOW: FLT_PREOP_SUCCESS_WITH_CALLBACK                   │
+│  ├── IRP_MJ_CREATE post-op (Endpoint Discover file tracking)    │
+│  └── FltCommunicationPort ("\\AkesoDLPPort")                 │
+├──────────────────────────── boundary ───────────────────────────┤
+│                          USER MODE                              │
+│                                                                 │
+│  akeso-dlp-agent.exe (Windows service)                       │
+│  ├── DriverComm       → FilterConnectCommunicationPort          │
+│  ├── ContentInspector  → text extraction (PDF, Office, archives)│
+│  ├── DetectionEngine   → Hyperscan regex, Aho-Corasick keywords │
+│  │                       data identifier validators (Luhn, etc) │
+│  ├── TTDClient         → forward to server for fingerprinting   │
+│  ├── PolicyEvaluator   → compound rules, exceptions, severity   │
+│  ├── ResponseExecutor  → block, notify, user-cancel, quarantine │
+│  ├── ClipboardMonitor  → NtUserSetClipboardData hook            │
+│  ├── BrowserMonitor    → WinHttpSendRequest hook                │
+│  ├── PolicyCache       → SQLite local cache with version sync   │
+│  ├── IncidentQueue     → memory-mapped file (1000 entries FIFO) │
+│  ├── GrpcClient        → mTLS to server (report, sync, TTD)    │
+│  └── Watchdog          → health monitor + tamper protection     │
+└─────────────────────────────────────────────────────────────────┘
+
+                            │ gRPC (mTLS)
+                            ▼
+
+┌─────────────────────────────────────────────────────────────────┐
+│                     SERVER STACK (Docker)                        │
+│                                                                 │
+│  akeso-dlp-server (Python/FastAPI)                           │
+│  ├── REST API          → policies, incidents, agents, detect    │
+│  ├── Auth              → JWT + TOTP MFA + role-based access     │
+│  ├── gRPC Service      → agent registration, heartbeat, TTD    │
+│  └── SIEM Emitter      → HTTP POST to AkesoSIEM             │
+│                                                                 │
+│  akeso-dlp-detect (Python)                                   │
+│  ├── RegexAnalyzer     → google-re2 (safe, no backtracking)    │
+│  ├── KeywordAnalyzer   → pyahocorasick                         │
+│  ├── DataIdentifier    → validators (Luhn, MOD-97, ABA, etc)   │
+│  ├── FileTypeAnalyzer  → python-magic (binary signatures)      │
+│  ├── FingerprintAnalyzer → simhash rolling hash                │
+│  └── PolicyEvaluator   → compound rule evaluation logic        │
+│                                                                 │
+│  akeso-dlp-network (Python)                                  │
+│  ├── HTTP Proxy        → mitmproxy (inspect uploads, block)    │
+│  └── SMTP Relay        → aiosmtpd (inspect email, block/modify)│
+│                                                                 │
+│  akeso-dlp-console (React)                                   │
+│  ├── Dashboard, Incidents, Policies, Agents, Discover, Reports │
+│  └── Dark mode, shadcn/ui, Recharts, shared SIEM design system │
+│                                                                 │
+│  PostgreSQL 16 │ Redis 7 │ MailHog (test MTA)                   │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-This repository currently ships the **Windows Endpoint Service** host and the **maankixflt** minifilter (vendored Microsoft MiniSpy). The service does not open the filter port. Policies, backend APIs, persistence, REST, the knowledge graph, and behavior intelligence are out of scope.
+---
 
-## Repository layout
+## Components
+
+| Component | Language | Description |
+|-----------|----------|-------------|
+| **akeso-dlp-driver** | C (WDK) | Windows minifilter driver. IRP_MJ_WRITE pre/post callbacks on monitored volumes. Filter communication port to user-mode agent. Shares architectural patterns with AkesoEDR's driver. |
+| **akeso-dlp-agent** | C++17 (MSVC) | Endpoint agent Windows service. Hyperscan SIMD regex, Aho-Corasick keywords, data identifier validators. Policy cache, incident queue, clipboard/browser monitors, gRPC client. |
+| **akeso-dlp-server** | Python/FastAPI | Management server. REST API, policy CRUD, incident management, user/role administration, gRPC service for agent communication, SIEM event emission. |
+| **akeso-dlp-detect** | Python | Server-side detection engine. Pluggable analyzers (regex, keyword, data identifier, file type, fingerprint). Policy evaluation with compound AND/OR/exception logic. |
+| **akeso-dlp-network** | Python | Network monitor. HTTP proxy (mitmproxy) and SMTP relay (aiosmtpd) with inline prevent capability (block, modify, redirect). |
+| **akeso-dlp-console** | React/TypeScript | Web dashboard. Policy editor, incident triage, agent management, Endpoint Discover, reporting, user risk scoring. Dark mode with AkesoSIEM shared design system. |
+
+---
+
+## Detection Technologies
+
+| Technology | Agent (C/C++) | Server (Python) | Description |
+|-----------|---------------|-----------------|-------------|
+| Regex matching | Hyperscan (SIMD, multi-pattern) | google-re2 (safe) | PCRE patterns against message components. Hyperscan evaluates thousands of patterns simultaneously. |
+| Keyword matching | Aho-Corasick | pyahocorasick | Keyword lists, phrases, dictionaries. Case modes. Proximity matching. |
+| Data identifiers | Native validators (Luhn, ABA, SSN) | Python validators | Pattern + validator model. 10 built-in identifiers with checksum validation. |
+| File type detection | Magic bytes (libmagic) | python-magic | Binary signature detection for 50+ types. Does not rely on extension. |
+| Document fingerprinting | Deferred to server (TTD) | Simhash rolling hash | Detect full or partial content matches from indexed confidential documents. |
+| Content extraction | pdfium, libxml2, minizip | pdfplumber, python-docx, openpyxl | Extract text from PDF, Office, archives (recursive, max depth 3). |
+
+---
+
+## Monitoring Channels
+
+| Channel | Mechanism | Pre-operation Block? |
+|---------|-----------|---------------------|
+| USB / Removable Storage | Minifilter IRP_MJ_WRITE pre-op on removable volumes | Yes |
+| Network Shares | Minifilter IRP_MJ_WRITE pre-op on network volumes | Yes |
+| Clipboard | NtUserSetClipboardData hook | Yes (pre-set) |
+| Browser Upload | WinHttpSendRequest / HttpSendRequestW hook via DLL injection | Yes (pre-send) |
+| HTTP Uploads | mitmproxy transparent proxy (POST/PUT body + multipart) | Yes (403 block) |
+| SMTP Email | aiosmtpd relay (headers, body, attachments) | Yes (550 reject / modify / redirect) |
+| Data at Rest | Endpoint Discover scan (incremental, CPU-throttled) | Quarantine |
+
+---
+
+## Response Actions
+
+| Action | Description |
+|--------|-------------|
+| **Block** | Minifilter returns STATUS_ACCESS_DENIED. File moved to recovery folder. Notification displayed. |
+| **Notify** | System tray toast notification with policy name and violation summary. |
+| **User Cancel** | Modal dialog with justification field. Submit → allow with logged justification. Timeout → block. |
+| **Log** | Always executes. Incident queued for server reporting. Persists to memory-mapped file if server unreachable. |
+| **Quarantine** | Move file to quarantine folder. Marker stub left at original path with recovery instructions. |
+
+---
+
+## Policy Templates
+
+| Template | Detects |
+|----------|---------|
+| PCI-DSS | Credit card numbers (Luhn-validated), cardholder data patterns |
+| HIPAA | Medical record numbers, diagnosis codes, patient identifiers |
+| GDPR | EU personal data — names + national IDs, IBAN, dates of birth |
+| SOX | Financial statements, audit data, insider trading indicators |
+| Source Code Leakage | Language-specific patterns, API keys, connection strings, certificates |
+| Confidential Documents | Fingerprinted confidential documents, classification markers |
+
+---
+
+## Akeso Portfolio Integration
+
+AkesoDLP fills the data protection role in the Akeso portfolio. Events emitted to AkesoSIEM enable cross-product correlation:
 
 ```
-.
-├── Directory.Build.props          Shared compiler and assembly metadata
-├── Directory.Packages.props       Central package versions
-├── global.json                    .NET 8 SDK pin
-├── Maankix.sln
-├── docs/
-│   ├── architecture.md
-│   ├── driver.md
-│   ├── BUILD.md
-│   ├── DEBUG.md
-│   └── adr/
-│       ├── ADR-001-lightweight-clean-architecture.md
-│       └── ADR-002-dotnet8-worker-windows-service.md
-└── src/
-    ├── Maankix.Endpoint.Service/  .NET 8 Worker Windows Service
-    └── Maankix.Endpoint.Driver/   maankixflt (MiniSpy) — WDK, not dotnet
+┌──────────────────────────────────────────────────────────────┐
+│                    AkesoSIEM (Go + ES)                    │
+│          Central correlator — Sigma rules — alerting         │
+│                                                              │
+│   Ingests: akeso_edr | akeso_av | akeso_dlp |       │
+│            akeso_ndr | windows | syslog                   │
+└──────┬───────────┬───────────┬───────────┬───────────────────┘
+       │           │           │           │
+┌──────┴──┐ ┌─────┴──┐ ┌────┴───┐ ┌────┴────┐
+│Akeso    │ │Akeso   │ │Akeso   │ │Akeso    │
+│EDR      │ │AV      │ │DLP     │ │NDR      │
+│Endpoint │ │Malware │ │Content │ │Network  │
+│behavior │ │detect  │ │inspect │ │metadata │
+└─────────┘ └────────┘ └────────┘ └─────────┘
 ```
 
-## Endpoint service layers
+**Cross-product correlation examples:**
 
-| Layer | Responsibility | May reference |
-| --- | --- | --- |
-| Domain | Ports and enterprise concepts | Nothing in this repository |
-| Application | Use-case composition contracts | Domain |
-| Infrastructure | Adapters and OS-facing registration | Domain |
-| Worker | Hosted process lifetime | Domain, Application, Configuration |
-| Configuration | Composition helpers, options, logging | All layers |
-| Common | Shared constants | Nothing layer-specific |
+- **EDR + DLP:** User whose workstation triggered EDR credential theft alert accesses confidential file within 30 minutes
+- **NDR + DLP:** NDR detects anomalous outbound volume to external IP → DLP confirms accessed files were classified as confidential
+- **EDR + NDR + DLP:** Credential dump on Host A → lateral movement to Host B → sensitive file access on Host B → outbound data transfer
 
-Domain must never reference Infrastructure. `Program.cs` is the composition root and contains no business logic.
+---
 
-## Build
+## Building
 
-Prerequisites: Windows 10 version 1809 or later, [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) (see `global.json`).
+### Prerequisites
+
+- **Python 3.12+** — server, detection engine, network monitor
+- **Node.js 22+** — React console
+- **Docker & Docker Compose** — infrastructure services
+- **Visual Studio 2022** with C++ desktop workload — agent (Windows only)
+- **Windows Driver Kit (WDK)** — minifilter driver (Windows only)
+- **CMake 3.20+** — agent build system
+
+### Server Stack (Docker)
 
 ```powershell
-dotnet restore Maankix.sln
-dotnet build Maankix.sln --configuration Release
+# Start all services (PostgreSQL, Redis, FastAPI, React, MailHog)
+docker compose up -d
+
+# Verify all healthy
+docker compose ps
 ```
 
-Warnings are errors. Public API requires XML documentation. Nullable reference types are enabled.
-
-## Run (interactive)
+### Server (Local Development)
 
 ```powershell
-dotnet run --project src/Maankix.Endpoint.Service --configuration Debug
+# Install dependencies
+make server-install
+
+# Start FastAPI dev server on :8000
+make server
 ```
 
-`DOTNET_ENVIRONMENT=Development` is set by `Properties/launchSettings.json`. Console logging uses the simple formatter in Development and JSON (structured) otherwise.
-
-## Install as a Windows Service
-
-Build Release, then register the binary with Service Control Manager. Run an elevated prompt:
+### Console (Local Development)
 
 ```powershell
-dotnet publish src/Maankix.Endpoint.Service -c Release -o C:\Maankix\Endpoint
+# Install dependencies
+make console-install
 
-sc.exe create MaankixEndpoint binPath= "C:\Maankix\Endpoint\Maankix.Endpoint.Service.exe" start= auto
-sc.exe description MaankixEndpoint "Maankix Windows endpoint data-loss prevention host."
-sc.exe start MaankixEndpoint
+# Start Vite dev server on :3000
+make console
 ```
 
-The process uses `AppContext.BaseDirectory` as the content root when SCM launches it, so `appsettings.json` is read from the publish directory rather than `C:\Windows\System32`.
+### Agent (Windows, requires MSVC + CMake)
 
-Event Log source `Maankix Endpoint Service` is written to the Application log. Creating a custom source the first time may require elevation; later checkpoints should register the source during install.
+```powershell
+# Configure and build
+make agent
 
-## Configuration
+# Or step by step:
+cmake -S agent -B agent/build -DCMAKE_BUILD_TYPE=Debug
+cmake --build agent/build --config Debug
+```
 
-`src/Maankix.Endpoint.Service/appsettings.json`
+### Verify
 
-| Key | Meaning |
-| --- | --- |
-| `Maankix:Endpoint:ServiceName` | Logical name used in structured logs |
-| `Maankix:Endpoint:ShutdownTimeout` | Generic-host stop timeout |
-| `Maankix:Driver:PortName` | Filter port (`\MiniSpyPort`) |
-| `Maankix:Driver:FilterName` | FltMgr name (`maankixflt`) |
-| `Maankix:Driver:AttachVolumes` | Volumes to attach after connect |
-| `Logging` | Log levels, console formatter, Event Log |
+```powershell
+# API health check
+(Invoke-WebRequest http://localhost:8000/api/health).Content
 
-User secrets id: `maankix-endpoint-service-0001`.
+# Console
+(Invoke-WebRequest http://localhost:3000).StatusCode
 
-## Design principles
+# MailHog
+(Invoke-WebRequest http://localhost:8025).StatusCode
+```
 
-SOLID, DRY, KISS, YAGNI, Clean Architecture, Clean Code, and Microsoft .NET Design Guidelines. The service now implements MiniSpy's user-mode port protocol (`IDriverClient`). Policy, blocking, and backend remain out of scope.
+---
 
-## Minifilter
+## Project Structure
 
-`src/Maankix.Endpoint.Driver` is Microsoft MiniSpy, renamed to **maankixflt**. Callbacks are untouched. Build with MSBuild + WDK:
+```
+claude-dlp/
+├── Makefile                    Build targets (server, console, agent, docker, test)
+├── docker-compose.yml          PostgreSQL, Redis, FastAPI, React, MailHog
+├── requirements.txt            Python dependencies
+├── server/                     Python server package
+│   ├── main.py                FastAPI application entry point
+│   ├── config.py              Settings (database, redis, auth, SIEM)
+│   ├── database.py            SQLAlchemy async engine + session
+│   ├── models/                SQLAlchemy ORM models
+│   ├── schemas/               Pydantic request/response schemas
+│   ├── routes/                FastAPI route handlers
+│   ├── services/              Business logic layer
+│   ├── proto/                 Generated gRPC stubs
+│   ├── scripts/               Seed data, MFA reset, utilities
+│   └── Dockerfile             Server container image
+├── agent/                     C/C++ endpoint agent
+│   ├── CMakeLists.txt         CMake build configuration
+│   ├── src/                   Agent source (main, detection, policy, response)
+│   ├── include/               Agent headers
+│   ├── driver/                Minifilter driver source
+│   └── config/                Agent YAML configuration
+├── console/                   React management console
+│   ├── src/                   App source (pages, components, hooks)
+│   ├── public/                Static assets
+│   ├── vite.config.ts         Vite + Tailwind + API proxy
+│   └── Dockerfile             Console container image
+├── proto/                     Shared protobuf definitions
+├── scripts/                   Utility scripts (wait-for-db, cert gen)
+└── migrations/                Alembic database migrations
+```
 
-- [Driver architecture](docs/driver.md)
-- [BUILD.md](docs/BUILD.md)
-- [DEBUG.md](docs/DEBUG.md)
-- [ORIGIN.md](src/Maankix.Endpoint.Driver/ORIGIN.md)
+---
 
-## Documentation
+## Implementation Phases
 
-- [Architecture](docs/architecture.md)
-- [ADR-001 Lightweight Clean Architecture](docs/adr/ADR-001-lightweight-clean-architecture.md)
-- [ADR-002 .NET 8 Worker Windows Service](docs/adr/ADR-002-dotnet8-worker-windows-service.md)
+| Phase | Description | Status |
+|-------|-------------|--------|
+| P0 | Project scaffolding, Docker, database schema, protobuf | Complete |
+| P1 | Server-side detection engine (regex, keywords, data IDs, file type, fingerprint) | Complete |
+| P2 | REST API & React console (auth, policies, incidents, agents) | Complete |
+| P3 | Endpoint agent core — minifilter driver, service, gRPC, policy cache | Complete |
+| P4 | Endpoint agent detection & response — Hyperscan, hooks, blocking, notifications | Complete |
+| P5 | Network monitor — HTTP proxy, SMTP relay, inline prevent | Complete |
+| P6 | Document fingerprinting (simhash) | Complete |
+| P7 | Endpoint Discover — data at rest scanning | Complete |
+| P8 | Reporting, user risk scoring, SIEM event export | Complete |
+| P9 | Console polish, agent management, demo environment | Complete |
+| P10 | Integration testing & documentation | Complete |
+| P11 | Hardening & production readiness (metrics, load testing, packaging) | Complete |
 
-## Out of scope (this checkpoint)
+**Total: 86 tasks, 12 phases. 71 PRs merged. All phases complete.**
 
-Policies, blocking, backend, SQLite, REST, knowledge graph, and AI / behavior intelligence.
+See `REQUIREMENTS.md` for the full implementation roadmap.
+
+---
+
+## License
+
+MIT License. See [LICENSE](LICENSE).
+
+## Disclaimer
+
+This is an educational proof-of-concept built for learning and portfolio purposes. It is **not** production security software. Deploy only in authorized, isolated test environments.
+
+## Acknowledgments
+
+- *Evading EDR* by Matt Hand (No Starch Press, 2023) — shared kernel driver infrastructure patterns with AkesoEDR

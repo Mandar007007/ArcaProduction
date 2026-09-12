@@ -1,0 +1,108 @@
+;;;
+;;; AkesoDLP Minifilter Driver
+;;; Content Screener - Altitude 320100
+;;;
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = "ContentScreener"
+ClassGuid   = {3e3f0674-c83c-4558-bb26-9820e1eba5c5}
+Provider    = %ProviderString%
+DriverVer   = 03/18/2026,1.0.0.0
+CatalogFile = akeso_dlp_filter.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir          = 12
+AkesoDLPFilter.DriverFiles = 12
+
+;;; ===================================================================
+;;; Default install sections
+;;; ===================================================================
+
+[DefaultInstall]
+OptionDesc  = %ServiceDescription%
+CopyFiles   = AkesoDLPFilter.DriverFiles
+
+[DefaultInstall.Services]
+AddService  = %ServiceName%,,AkesoDLPFilter.Service
+
+[DefaultInstall.NTAMD64]
+OptionDesc  = %ServiceDescription%
+CopyFiles   = AkesoDLPFilter.DriverFiles
+
+[DefaultInstall.NTAMD64.Services]
+AddService  = %ServiceName%,,AkesoDLPFilter.Service
+
+;;; ===================================================================
+;;; Default uninstall sections
+;;; ===================================================================
+
+[DefaultUninstall]
+LegacyUninstall = 1
+DelFiles        = AkesoDLPFilter.DriverFiles
+
+[DefaultUninstall.Services]
+DelService = %ServiceName%,0x200
+
+[DefaultUninstall.NTAMD64]
+LegacyUninstall = 1
+DelFiles        = AkesoDLPFilter.DriverFiles
+
+[DefaultUninstall.NTAMD64.Services]
+DelService = %ServiceName%,0x200
+
+;;; ===================================================================
+;;; Service configuration
+;;; ===================================================================
+
+[AkesoDLPFilter.Service]
+DisplayName    = %ServiceName%
+Description    = %ServiceDescription%
+ServiceBinary  = %13%\akeso_dlp_filter.sys
+Dependencies   = "FltMgr"
+ServiceType    = 2                ; SERVICE_FILE_SYSTEM_DRIVER
+StartType      = 3                ; SERVICE_DEMAND_START
+ErrorControl   = 1                ; SERVICE_ERROR_NORMAL
+LoadOrderGroup = "FSFilter Content Screener"
+AddReg         = AkesoDLPFilter.AddRegistry
+
+;;; ===================================================================
+;;; Filter Manager registration
+;;; ===================================================================
+
+[AkesoDLPFilter.AddRegistry]
+HKR,"Instances","DefaultInstance",0x00000000,%DefaultInstance%
+HKR,"Instances\"%Instance1.Name%,"Altitude",0x00000000,%Instance1.Altitude%
+HKR,"Instances\"%Instance1.Name%,"Flags",0x00010001,%Instance1.Flags%
+
+;;; ===================================================================
+;;; File copy
+;;; ===================================================================
+
+[AkesoDLPFilter.DriverFiles]
+akeso_dlp_filter.sys
+
+;;; ===================================================================
+;;; Source disk information
+;;; ===================================================================
+
+[SourceDisksFiles]
+akeso_dlp_filter.sys = 1,,
+
+[SourceDisksNames]
+1 = %DiskId1%,,,
+
+;;; ===================================================================
+;;; String definitions
+;;; ===================================================================
+
+[Strings]
+ProviderString      = "Akeso Security"
+ServiceName         = "AkesoDLPFilter"
+ServiceDescription  = "AkesoDLP Minifilter - File I/O content screening"
+DefaultInstance     = "AkesoDLP Instance"
+Instance1.Name      = "AkesoDLP Instance"
+Instance1.Altitude  = "320100"
+Instance1.Flags     = 0x0              ; Automatic attachment
+DiskId1             = "AkesoDLP Installation Disk"

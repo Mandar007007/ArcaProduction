@@ -1,0 +1,10 @@
+^C:\XLMPROJECTS\ARCA\AGENT\DRIVER\CMAKELISTS.TXT
+setlocal
+C:\Users\MandarParekh\AppData\Local\Microsoft\WinGet\Packages\Kitware.CMake_Microsoft.Winget.Source_8wekyb3d8bbwe\cmake-4.4.3-windows-x86_64\bin\cmake.exe -SC:/xlmProjects/Arca/agent -BC:/xlmProjects/Arca/agent/build-driver --check-stamp-file C:/xlmProjects/Arca/agent/build-driver/driver/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

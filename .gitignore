@@ -1,126 +1,40 @@
-## Maankix .gitignore
-## Visual Studio / .NET / Rider / VS Code
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.venv/
+venv/
 
-# Build
-[Bb]in/
-[Oo]bj/
-[Ll]og/
-[Ll]ogs/
-[Dd]ebug/
-[Rr]elease/
-x64/
-x86/
-[Ww][Ii][Nn]32/
-[Aa][Rr][Mm]/
-[Aa][Rr][Mm]64/
-bld/
-[Aa]rtifacts/
-msbuild.log
-msbuild.err
-msbuild.wrn
+# Node
+node_modules/
+console/dist/
 
-# Visual Studio
-.vs/
-*.user
-*.userosscache
-*.sln.docstates
-*.rsuser
-*.suo
-*.userprefs
-*.pidb
-*.svclog
-*.scc
-*.cachefile
-*.VC.db
-*.VC.VC.opendb
-*.opensdf
-*.sdf
-*.cache
-*.ilk
-*.meta
-*.obj
-*.iobj
-*.pch
-*.pdb
-*.ipdb
-*.pgc
-*.pgd
-*.rsp
-*.sbr
-*.tlb
-*.tli
-*.tlh
-*.tmp
-*.tmp_proj
-*_wpftmp.csproj
-*.log
-*.tlog
-*.vspscc
-*.vssscc
-.builds
-*.pidb
-*.svclog
-*.scc
+# Agent build
+agent/build/
 
-# Test / coverage
-[Tt]est[Rr]esult*/
-[Bb]uild[Ll]og.*
-*.coverage
-*.coveragexml
-coverage*.json
-coverage*.xml
-TestResults/
-*.trx
-
-# NuGet
-*.nupkg
-*.snupkg
-**/[Pp]ackages/*
-!**/[Pp]ackages/build/
-project.lock.json
-project.fragment.lock.json
-artifacts/
-
-# Publish
-publish/
-publish-output/
-*.publishproj
-
-# Rider / JetBrains
+# IDE
+.vscode/
 .idea/
-*.sln.iml
-
-# VS Code (keep shared settings if added later)
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-
-# User secrets / local config
-appsettings.*.local.json
-*.local.json
-secrets.json
+*.swp
 
 # OS
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-$RECYCLE.BIN/
 .DS_Store
+Thumbs.db
 
-# Others
-*.swp
-*~
-.dotnet/
-.nuget/
-*.DotSettings.user
+# Environment
+.env
+*.env.local
 
-# WDK / MiniSpy vendor clone
-_minispy_upstream/
-*.sys
-*.cat
-*.cer
-*.dvl.xml
-*.map
-*.inf.bak
+# Docker
+pgdata/
+
+# Proto generated (committed for convenience — regenerate with `make proto`)
+
+# Logs
+*.log
+
+# Test
+.coverage
+htmlcov/
+.pytest_cache/

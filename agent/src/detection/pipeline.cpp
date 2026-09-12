@@ -1,0 +1,1314 @@
+/*
+ * pipeline.cpp
+ * AkesoDLP Agent - Detection Pipeline (P4-T7)
+ *
+ * Full detection flow:
+ *   Driver → extract content → detect file type → regex + keyword scan
+ *   → evaluate policies → TTD (if needed) → verdict → queue incident
+ */
+
+#include "akeso/detection/pipeline.h"
+#include "akeso/grpc_client.h"
+#include "akeso/incident_queue.h"
+#include "akeso/policy_cache.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <thread>
+
+#ifdef HAS_SPDLOG
+#include <spdlog/spdlog.h>
+#define LOG_INFO(...)    spdlog::info(__VA_ARGS__)
+#define LOG_WARN(...)    spdlog::warn(__VA_ARGS__)
+#define LOG_ERROR(...)   spdlog::error(__VA_ARGS__)
+#define LOG_DEBUG(...)   spdlog::debug(__VA_ARGS__)
+#define LOG_TRACE(...)   spdlog::trace(__VA_ARGS__)
+#else
+#include <iostream>
+#define LOG_INFO(fmt, ...)    std::cout << "[INFO] " << fmt << std::endl
+#define LOG_WARN(fmt, ...)    std::cerr << "[WARN] " << fmt << std::endl
+#define LOG_ERROR(fmt, ...)   std::cerr << "[ERROR] " << fmt << std::endl
+#define LOG_DEBUG(fmt, ...)   (void)0
+#define LOG_TRACE(fmt, ...)   (void)0
+#endif
+
+#pragma warning(push)
+#pragma warning(disable: 4267)
+#include "akesodlp.grpc.pb.h"
+#pragma warning(pop)
+
+namespace akeso::dlp {
+
+/* ================================================================== */
+/*  Constructor / Destructor                                           */
+/* ================================================================== */
+
+DetectionPipeline::DetectionPipeline(
+    const AgentConfig& config,
+    std::shared_ptr<DriverComm> driver_comm,
+    std::shared_ptr<GrpcClient> grpc_client,
+    std::shared_ptr<IncidentQueue> incident_queue,
+    std::shared_ptr<PolicyCache> policy_cache,
+    std::shared_ptr<ClipboardMonitor> clipboard_monitor,
+    std::shared_ptr<BrowserUploadMonitor> browser_monitor,
+    std::shared_ptr<DiscoverScanner> discover_scanner)
+    : detection_config_(config.detection)
+    , monitoring_config_(config.monitoring)
+    , driver_comm_(std::move(driver_comm))
+    , grpc_client_(std::move(grpc_client))
+    , incident_queue_(std::move(incident_queue))
+    , policy_cache_(std::move(policy_cache))
+    , clipboard_monitor_(std::move(clipboard_monitor))
+    , browser_monitor_(std::move(browser_monitor))
+    , discover_scanner_(std::move(discover_scanner))
+    , content_extractor_(ExtractionOptions{
+          static_cast<size_t>(config.detection.max_scan_size),
+          2,        /* max_zip_depth on agent */
+          10485760, /* 10 MB per zip entry */
+          100,      /* max zip entries */
+          6         /* min string run */
+      })
+#ifdef HAS_HYPERSCAN
+    , regex_analyzer_(config.detection)
+#endif
+    , keyword_analyzer_(config.detection)
+    , block_action_(config.recovery)
+    , quarantine_action_(config.quarantine)
+{
+}
+
+DetectionPipeline::~DetectionPipeline() {
+    Stop();
+}
+
+/* ================================================================== */
+/*  IAgentComponent                                                    */
+/* ================================================================== */
+
+bool DetectionPipeline::Start() {
+    if (running_) return true;
+
+    LOG_INFO("DetectionPipeline: starting...");
+
+    /* Start sub-components */
+#ifdef HAS_HYPERSCAN
+    if (!regex_analyzer_.Start()) {
+        LOG_ERROR("DetectionPipeline: failed to start HsRegexAnalyzer");
+        return false;
+    }
+#endif
+
+    if (!keyword_analyzer_.Start()) {
+        LOG_ERROR("DetectionPipeline: failed to start KeywordAnalyzer");
+        return false;
+    }
+
+    /* Start notification dispatcher (P4-T8) */
+    notifier_.Start();
+
+    /* Register verdict callback with DriverComm */
+    if (driver_comm_) {
+        driver_comm_->SetVerdictCallback(
+            [this](const FileNotification& notif) -> DriverMsgType {
+                return OnFileNotification(notif);
+            }
+        );
+        LOG_INFO("DetectionPipeline: verdict callback registered with DriverComm");
+    }
+
+    /* Register clipboard content callback (P4-T10) */
+    if (clipboard_monitor_) {
+        clipboard_monitor_->SetContentCallback(
+            [this](const ClipboardContent& content) {
+                OnClipboardContent(content);
+            }
+        );
+        LOG_INFO("DetectionPipeline: clipboard callback registered with ClipboardMonitor");
+    }
+
+    /* Register browser upload callback (P4-T11) */
+    if (browser_monitor_) {
+        browser_monitor_->SetUploadCallback(
+            [this](const BrowserUploadEvent& event) {
+                OnBrowserUpload(event);
+            }
+        );
+        LOG_INFO("DetectionPipeline: upload callback registered with BrowserUploadMonitor");
+    }
+
+    /* Register discover file callback (P7-T1) */
+    if (discover_scanner_) {
+        discover_scanner_->SetFileCallback(
+            [this](const DiscoverFileEvent& event) {
+                OnDiscoverFile(event);
+            }
+        );
+        LOG_INFO("DetectionPipeline: discover callback registered with DiscoverScanner");
+    }
+
+    running_ = true;
+    LOG_INFO("DetectionPipeline: started");
+    return true;
+}
+
+void DetectionPipeline::Stop() {
+    if (!running_) return;
+
+    LOG_INFO("DetectionPipeline: stopping...");
+    running_ = false;
+
+    /* Clear callbacks */
+    if (discover_scanner_) {
+        discover_scanner_->SetFileCallback(nullptr);
+    }
+    if (browser_monitor_) {
+        browser_monitor_->SetUploadCallback(nullptr);
+    }
+    if (clipboard_monitor_) {
+        clipboard_monitor_->SetContentCallback(nullptr);
+    }
+    if (driver_comm_) {
+        driver_comm_->SetVerdictCallback(nullptr);
+    }
+
+    /* Stop sub-components */
+    notifier_.Stop();
+    keyword_analyzer_.Stop();
+#ifdef HAS_HYPERSCAN
+    regex_analyzer_.Stop();
+#endif
+
+    /* Log final stats */
+    auto s = GetStats();
+    LOG_INFO("DetectionPipeline: stopped - scanned={}, allowed={}, blocked={}, "
+             "violations={}, ttd={}, errors={}",
+             s.files_scanned, s.files_allowed, s.files_blocked,
+             s.violations_detected, s.ttd_requests_sent, s.errors);
+}
+
+bool DetectionPipeline::IsHealthy() const {
+    if (!running_) return false;
+#ifdef HAS_HYPERSCAN
+    if (!regex_analyzer_.IsHealthy()) return false;
+#endif
+    if (!keyword_analyzer_.IsHealthy()) return false;
+    return true;
+}
+
+/* ================================================================== */
+/*  Policy management                                                  */
+/* ================================================================== */
+
+void DetectionPipeline::UpdatePolicies(const std::vector<Policy>& policies) {
+    std::lock_guard<std::mutex> lock(policy_mutex_);
+    policies_ = policies;
+
+    /* Rebuild analyzer databases from policy patterns */
+    std::vector<RegexPattern> all_regex;
+    std::vector<KeywordEntry> all_keywords;
+    unsigned int regex_id = 1;
+    unsigned int kw_id = 1;
+
+    for (const auto& policy : policies_) {
+        if (!policy.active) continue;
+
+        for (const auto& rule : policy.detection_rules) {
+            for (const auto& cond : rule.conditions) {
+                if (cond.type == ConditionType::Regex && !cond.pattern_label.empty()) {
+                    RegexPattern rp;
+                    rp.id = regex_id++;
+                    rp.expression = cond.pattern_label;
+                    rp.flags = 0;  /* Default flags */
+                    rp.label = cond.pattern_label;
+                    all_regex.push_back(rp);
+                } else if (cond.type == ConditionType::Keyword && !cond.pattern_label.empty()) {
+                    KeywordEntry ke;
+                    ke.id = kw_id++;
+                    ke.keyword = cond.pattern_label;
+                    ke.case_sensitive = false;
+                    ke.whole_word = true;
+                    ke.label = cond.pattern_label;
+                    all_keywords.push_back(ke);
+                }
+            }
+        }
+    }
+
+    /* Compile analyzers */
+#ifdef HAS_HYPERSCAN
+    if (!all_regex.empty()) {
+        if (regex_analyzer_.CompilePatterns(all_regex)) {
+            LOG_INFO("DetectionPipeline: compiled {} regex patterns", all_regex.size());
+        } else {
+            LOG_ERROR("DetectionPipeline: failed to compile regex patterns");
+        }
+    }
+#endif
+
+    if (!all_keywords.empty()) {
+        if (keyword_analyzer_.BuildAutomaton(all_keywords)) {
+            LOG_INFO("DetectionPipeline: built automaton with {} keywords", all_keywords.size());
+        } else {
+            LOG_ERROR("DetectionPipeline: failed to build keyword automaton");
+        }
+    }
+
+    LOG_INFO("DetectionPipeline: updated {} policies ({} regex, {} keywords)",
+             policies_.size(), all_regex.size(), all_keywords.size());
+}
+
+size_t DetectionPipeline::ActivePolicyCount() const {
+    std::lock_guard<std::mutex> lock(policy_mutex_);
+    return std::count_if(policies_.begin(), policies_.end(),
+                         [](const Policy& p) { return p.active; });
+}
+
+/* ================================================================== */
+/*  Statistics                                                         */
+/* ================================================================== */
+
+PipelineStats DetectionPipeline::GetStats() const {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    return stats_;
+}
+
+/* ================================================================== */
+/*  Core: File notification handler                                    */
+/* ================================================================== */
+
+DriverMsgType DetectionPipeline::OnFileNotification(const FileNotification& notif) {
+    if (!running_) {
+        return DriverMsgType::VerdictAllow;
+    }
+
+    auto start_time = std::chrono::steady_clock::now();
+    std::string filepath_utf8 = WideToUtf8(notif.file_path);
+
+    /* Skip empty paths and empty previews silently */
+    if (filepath_utf8.empty() || notif.content_preview.empty()) {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.files_scanned++;
+        stats_.files_allowed++;
+        return DriverMsgType::VerdictAllow;
+    }
+
+    LOG_INFO("DetectionPipeline: [SCAN] pid={} file={} size={} preview={}B",
+             notif.process_id, filepath_utf8, notif.file_size,
+             notif.content_preview.size());
+
+    /* Increment scan counter */
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.files_scanned++;
+    }
+
+    /* Skip if no policies loaded */
+    {
+        std::lock_guard<std::mutex> lock(policy_mutex_);
+        if (policies_.empty()) {
+            LOG_INFO("DetectionPipeline: [ALLOW] no policies loaded - pid={} file={}",
+                     notif.process_id, filepath_utf8);
+            std::lock_guard<std::mutex> slock(stats_mutex_);
+            stats_.files_allowed++;
+            return DriverMsgType::VerdictAllow;
+        }
+    }
+
+    /* ---- Stage 1: Run detection on content preview ---- */
+    DetectionResult detection;
+    try {
+        detection = RunDetection(
+            notif.content_preview.data(),
+            notif.content_preview.size(),
+            filepath_utf8,
+            notif.file_size
+        );
+    } catch (const std::exception& ex) {
+        LOG_ERROR("DetectionPipeline: detection failed for {}: {}", filepath_utf8, ex.what());
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.errors++;
+        stats_.files_allowed++;
+        return DriverMsgType::VerdictAllow;  /* Fail-open */
+    }
+
+    /* ---- Stage 2: Evaluate all policies ---- */
+    std::vector<PolicyViolation> violations;
+    {
+        std::lock_guard<std::mutex> lock(policy_mutex_);
+        violations = policy_evaluator_.EvaluateAll(policies_, detection);
+    }
+
+    if (violations.empty()) {
+        LOG_TRACE("DetectionPipeline: no violations for {}", filepath_utf8);
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.files_allowed++;
+        return DriverMsgType::VerdictAllow;
+    }
+
+    /* ---- Stage 3: Find the most severe violation ---- */
+    const PolicyViolation* worst = &violations[0];
+    for (size_t i = 1; i < violations.size(); ++i) {
+        if (violations[i].severity > worst->severity) {
+            worst = &violations[i];
+        }
+    }
+
+    LOG_INFO("DetectionPipeline: VIOLATION - policy='{}' severity={} matches={} file={}",
+             worst->policy_name, SeverityToString(worst->severity),
+             worst->match_count, filepath_utf8);
+
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.violations_detected += violations.size();
+    }
+
+    /* ---- Stage 4: Determine verdict ---- */
+    DriverMsgType verdict;
+    std::string user_cancel_justification;
+
+    if (worst->response == ResponseAction::TTD) {
+        /* Forward to server for full analysis */
+        verdict = RequestTTD(notif, *worst);
+    } else if (worst->response == ResponseAction::UserCancel) {
+        /*
+         * UserCancel is SYNCHRONOUS — we must show the dialog and wait
+         * for the user's response before returning the verdict to the driver.
+         * The driver I/O is held pending while the user decides.
+         */
+        std::string match_summary = std::to_string(worst->match_count) + " match(es)";
+        auto uc_result = user_cancel_action_.ShowDialog(
+            worst->policy_name,
+            SeverityToString(worst->severity),
+            filepath_utf8,
+            match_summary);
+
+        verdict = uc_result.verdict;
+        user_cancel_justification = uc_result.justification;
+
+        if (uc_result.timed_out) {
+            LOG_WARN("DetectionPipeline: [USER_CANCEL] timed out - blocking file={}",
+                     filepath_utf8);
+        } else if (uc_result.user_cancelled) {
+            LOG_INFO("DetectionPipeline: [USER_CANCEL] user blocked - file={}",
+                     filepath_utf8);
+        } else {
+            LOG_INFO("DetectionPipeline: [USER_CANCEL] user allowed - justification='{}' file={}",
+                     uc_result.justification, filepath_utf8);
+        }
+    } else {
+        verdict = ActionToVerdict(worst->response);
+    }
+
+    /* ---- Stage 5: Determine action string and update stats ---- */
+    std::string action_str;
+    switch (verdict) {
+        case DriverMsgType::VerdictBlock:   action_str = "block"; break;
+        case DriverMsgType::VerdictAllow:   action_str = "allow"; break;
+        default:                            action_str = "log"; break;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        if (verdict == DriverMsgType::VerdictBlock) {
+            stats_.files_blocked++;
+        } else {
+            stats_.files_allowed++;
+        }
+    }
+
+    auto elapsed = std::chrono::steady_clock::now() - start_time;
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    LOG_INFO("DetectionPipeline: [{}] file={} violations={} elapsed={}ms",
+             action_str, filepath_utf8, violations.size(), ms);
+
+    /*
+     * ---- Stage 6: Post-verdict work (async) ----
+     *
+     * Return the verdict to the driver IMMEDIATELY so the I/O completes
+     * (or is denied) without waiting for incident queuing, file recovery,
+     * or toast notifications. All post-verdict work runs on a detached
+     * background thread.
+     */
+    auto post_verdict_work = [this,
+                              verdict,
+                              notif,
+                              violations = std::move(violations),
+                              filepath_utf8,
+                              action_str,
+                              worst_policy = worst->policy_name,
+                              worst_severity = SeverityToString(worst->severity),
+                              worst_match_count = worst->match_count,
+                              worst_response = worst->response,
+                              user_cancel_justification]() {
+        /* Build action string with justification for UserCancel */
+        std::string effective_action = action_str;
+        if (worst_response == ResponseAction::UserCancel) {
+            if (verdict == DriverMsgType::VerdictAllow) {
+                effective_action = "user_cancel_allow (justification: " + user_cancel_justification + ")";
+            } else {
+                effective_action = "user_cancel_block";
+            }
+        }
+
+        /* Queue all violations as incidents */
+        for (const auto& v : violations) {
+            QueueIncident(notif, v, effective_action);
+        }
+
+        /* Execute block response (P4-T8) */
+        if (verdict == DriverMsgType::VerdictBlock && worst_response == ResponseAction::Block) {
+            std::string match_summary = std::to_string(worst_match_count) + " match(es)";
+
+            /* Move file to recovery folder */
+            auto block_result = block_action_.Execute(
+                filepath_utf8,
+                "",
+                worst_policy,
+                worst_severity,
+                match_summary,
+                notif.process_id);
+
+            /* Show toast notification */
+            notifier_.ShowBlockNotification(
+                worst_policy,
+                worst_severity,
+                filepath_utf8,
+                match_summary,
+                block_result.recovery_path);
+        } else if (verdict == DriverMsgType::VerdictBlock && worst_response == ResponseAction::UserCancel) {
+            /* UserCancel blocked — show block notification but no file recovery
+             * (the driver already denied the I/O, the user chose to block) */
+            std::string match_summary = std::to_string(worst_match_count) + " match(es)";
+            notifier_.ShowBlockNotification(
+                worst_policy,
+                worst_severity,
+                filepath_utf8,
+                match_summary + " (user cancelled)",
+                "");
+        } else if (worst_response == ResponseAction::Notify) {
+            std::string match_summary = std::to_string(worst_match_count) + " match(es)";
+            notifier_.ShowNotifyNotification(
+                worst_policy,
+                worst_severity,
+                filepath_utf8,
+                match_summary);
+        }
+    };
+
+    std::thread(std::move(post_verdict_work)).detach();
+
+    return verdict;
+}
+
+/* ================================================================== */
+/*  Detection stages                                                   */
+/* ================================================================== */
+
+DetectionResult DetectionPipeline::RunDetection(
+    const uint8_t* content, size_t content_len,
+    const std::string& filename, int64_t file_size)
+{
+    DetectionResult result;
+    result.filename = filename;
+    result.file_size = static_cast<size_t>(file_size);
+
+    /* Step 1: Detect file type */
+    auto ft = file_type_detector_.Detect(
+        content, content_len, filename);
+    result.file_type = ft.type_name;
+
+    /* Step 2: Extract text content */
+    auto extractions = content_extractor_.Extract(
+        content, content_len, ft, filename);
+
+    /* Step 3: Scan each extraction result */
+    for (const auto& ext : extractions) {
+        if (!ext.success || ext.text.empty()) continue;
+
+        const char* text = ext.text.c_str();
+        size_t text_len = ext.text.size();
+
+        /* Regex scan */
+#ifdef HAS_HYPERSCAN
+        auto regex_matches = regex_analyzer_.Scan(text, text_len);
+        for (const auto& m : regex_matches) {
+            DetectionMatch dm;
+            dm.pattern_id = m.pattern_id;
+            dm.analyzer_name = "regex";
+            dm.label = m.label;
+            dm.matched_text = ext.text.substr(
+                static_cast<size_t>(m.from),
+                static_cast<size_t>(m.to - m.from));
+            dm.offset = static_cast<size_t>(m.from);
+            dm.component = "body";
+            result.matches.push_back(std::move(dm));
+        }
+#endif
+
+        /* Keyword scan */
+        auto kw_matches = keyword_analyzer_.Scan(text, text_len);
+        for (const auto& m : kw_matches) {
+            DetectionMatch dm;
+            dm.pattern_id = m.pattern_id;
+            dm.analyzer_name = "keyword";
+            dm.label = m.label;
+            dm.matched_text = m.keyword;
+            dm.offset = m.offset;
+            dm.component = "body";
+            result.matches.push_back(std::move(dm));
+        }
+    }
+
+    return result;
+}
+
+/* ================================================================== */
+/*  Two-Tier Detection (TTD)                                           */
+/* ================================================================== */
+
+DriverMsgType DetectionPipeline::RequestTTD(
+    const FileNotification& notif,
+    const PolicyViolation& violation)
+{
+    if (!grpc_client_) {
+        LOG_WARN("DetectionPipeline: TTD requested but no gRPC client — "
+                 "applying fallback");
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.ttd_timeouts++;
+        /* Find the policy to get ttd_fallback */
+        std::lock_guard<std::mutex> plock(policy_mutex_);
+        for (const auto& p : policies_) {
+            if (p.id == violation.policy_id) {
+                return ActionToVerdict(p.ttd_fallback);
+            }
+        }
+        return DriverMsgType::VerdictAllow;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.ttd_requests_sent++;
+        stats_.files_ttd++;
+    }
+
+    /* Build TTD request */
+    akesodlp::DetectContentRequest request;
+    request.set_agent_id(grpc_client_->GetAgentId());
+    request.set_request_id(std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count()));
+
+    /* Include content preview */
+    request.set_file_content(
+        std::string(notif.content_preview.begin(), notif.content_preview.end()));
+
+    std::string filepath_utf8 = WideToUtf8(notif.file_path);
+    request.set_file_name(filepath_utf8);
+    request.set_file_size(notif.file_size);
+    request.set_timeout_seconds(detection_config_.ttd_timeout);
+    request.set_fallback_action(detection_config_.ttd_fallback);
+
+    /* Context — channel is a top-level field in the proto */
+    request.set_channel(
+        static_cast<akesodlp::Channel>(
+            static_cast<int>(notif.volume_type)));
+
+    /* Send to server */
+    akesodlp::DetectContentResponse response;
+    bool ok = grpc_client_->DetectContent(request, &response);
+
+    if (!ok) {
+        LOG_WARN("DetectionPipeline: TTD request failed — applying fallback");
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.ttd_timeouts++;
+
+        /* Apply ttd_fallback from policy */
+        std::lock_guard<std::mutex> plock(policy_mutex_);
+        for (const auto& p : policies_) {
+            if (p.id == violation.policy_id) {
+                return ActionToVerdict(p.ttd_fallback);
+            }
+        }
+        return DriverMsgType::VerdictAllow;
+    }
+
+    /* Map server verdict */
+    switch (response.verdict()) {
+        case akesodlp::TTD_BLOCK:
+            LOG_INFO("DetectionPipeline: TTD verdict=BLOCK");
+            return DriverMsgType::VerdictBlock;
+        case akesodlp::TTD_LOG:
+            LOG_INFO("DetectionPipeline: TTD verdict=LOG");
+            return DriverMsgType::VerdictAllow;
+        case akesodlp::TTD_ALLOW:
+        default:
+            LOG_INFO("DetectionPipeline: TTD verdict=ALLOW");
+            return DriverMsgType::VerdictAllow;
+    }
+}
+
+/* ================================================================== */
+/*  Incident queuing                                                   */
+/* ================================================================== */
+
+void DetectionPipeline::QueueIncident(
+    const FileNotification& notif,
+    const PolicyViolation& violation,
+    const std::string& action_taken)
+{
+    if (!incident_queue_) return;
+
+    std::string filepath_utf8 = WideToUtf8(notif.file_path);
+
+    /* Extract just the filename from the path */
+    std::string filename;
+    auto pos = filepath_utf8.find_last_of("/\\");
+    if (pos != std::string::npos) {
+        filename = filepath_utf8.substr(pos + 1);
+    } else {
+        filename = filepath_utf8;
+    }
+
+    QueuedIncident qi;
+    qi.policy_name = violation.policy_name;
+    qi.severity = SeverityToString(violation.severity);
+    qi.channel = VolumeToChannel(notif.volume_type);
+    qi.source_type = "endpoint";
+    qi.file_name = filename;
+    qi.file_path = filepath_utf8;
+    qi.user = "";  /* TODO: resolve process owner from PID */
+    qi.match_count = violation.match_count;
+    qi.action_taken = action_taken;
+
+    /* Build matched content JSON */
+    std::string matches_json = "{\"matches\":[";
+    for (size_t i = 0; i < violation.matches.size() && i < 10; ++i) {
+        if (i > 0) matches_json += ",";
+        matches_json += "{\"type\":\"" + violation.matches[i].analyzer_name + "\","
+                        "\"label\":\"" + violation.matches[i].label + "\","
+                        "\"count\":1}";
+    }
+    matches_json += "]}";
+    qi.matched_content = matches_json;
+
+    if (incident_queue_->Enqueue(qi)) {
+        LOG_DEBUG("DetectionPipeline: incident queued for policy '{}'", violation.policy_name);
+    } else {
+        LOG_DEBUG("DetectionPipeline: incident not queued (duplicate or full)");
+    }
+}
+
+/* ================================================================== */
+/*  Clipboard content handler (P4-T10)                                 */
+/* ================================================================== */
+
+void DetectionPipeline::OnClipboardContent(const ClipboardContent& clip_content)
+{
+    if (!running_) return;
+
+    auto start_time = std::chrono::steady_clock::now();
+
+    LOG_INFO("DetectionPipeline: [CLIP_SCAN] source_pid={} source='{}' text={}B",
+             clip_content.source_pid, clip_content.source_process,
+             clip_content.text.size());
+
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.clips_scanned++;
+    }
+
+    /* Skip if no policies loaded */
+    {
+        std::lock_guard<std::mutex> lock(policy_mutex_);
+        if (policies_.empty()) {
+            LOG_DEBUG("DetectionPipeline: [CLIP_ALLOW] no policies loaded");
+            return;
+        }
+    }
+
+    /* Run detection on clipboard text */
+    const auto* content_bytes = reinterpret_cast<const uint8_t*>(clip_content.text.data());
+    size_t content_len = clip_content.text.size();
+
+    DetectionResult detection;
+    try {
+        detection = RunDetection(
+            content_bytes, content_len,
+            "clipboard", static_cast<int64_t>(content_len));
+    } catch (const std::exception& ex) {
+        LOG_ERROR("DetectionPipeline: clipboard detection failed: {}", ex.what());
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.errors++;
+        return;
+    }
+
+    /* Evaluate all policies */
+    std::vector<PolicyViolation> violations;
+    {
+        std::lock_guard<std::mutex> lock(policy_mutex_);
+        violations = policy_evaluator_.EvaluateAll(policies_, detection);
+    }
+
+    if (violations.empty()) {
+        return;  /* Clean clipboard content */
+    }
+
+    /* Find worst violation */
+    const PolicyViolation* worst = &violations[0];
+    for (size_t i = 1; i < violations.size(); ++i) {
+        if (violations[i].severity > worst->severity) {
+            worst = &violations[i];
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.clips_violations += violations.size();
+    }
+
+    std::string match_summary = std::to_string(worst->match_count) + " match(es)";
+
+    LOG_INFO("DetectionPipeline: [CLIP_VIOLATION] policy='{}' severity={} matches={} source='{}'",
+             worst->policy_name, SeverityToString(worst->severity),
+             worst->match_count, clip_content.source_process);
+
+    /* Determine response */
+    std::string action_str;
+
+    if (worst->response == ResponseAction::Block) {
+        /* Clear the clipboard to remove sensitive data */
+        if (clipboard_monitor_) {
+            clipboard_monitor_->ClearClipboard();
+        }
+        action_str = "clipboard_block";
+
+        {
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            stats_.clips_blocked++;
+        }
+
+        LOG_INFO("DetectionPipeline: [CLIP_BLOCK] clipboard cleared - policy='{}' source='{}'",
+                 worst->policy_name, clip_content.source_process);
+
+        /* Show block notification */
+        notifier_.ShowBlockNotification(
+            worst->policy_name,
+            SeverityToString(worst->severity),
+            "clipboard (from " + clip_content.source_process + ")",
+            match_summary,
+            "");
+    } else if (worst->response == ResponseAction::UserCancel) {
+        /* Show justification dialog */
+        auto uc_result = user_cancel_action_.ShowDialog(
+            worst->policy_name,
+            SeverityToString(worst->severity),
+            "clipboard (from " + clip_content.source_process + ")",
+            match_summary);
+
+        if (uc_result.verdict == DriverMsgType::VerdictBlock) {
+            /* User cancelled or timed out - clear clipboard */
+            if (clipboard_monitor_) {
+                clipboard_monitor_->ClearClipboard();
+            }
+            action_str = "clipboard_user_cancel_block";
+
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                stats_.clips_blocked++;
+            }
+        } else {
+            action_str = "clipboard_user_cancel_allow (justification: " + uc_result.justification + ")";
+        }
+    } else if (worst->response == ResponseAction::Notify) {
+        action_str = "clipboard_notify";
+
+        /* Show notify toast */
+        notifier_.ShowNotifyNotification(
+            worst->policy_name,
+            SeverityToString(worst->severity),
+            "clipboard (from " + clip_content.source_process + ")",
+            match_summary);
+    } else {
+        action_str = "clipboard_allow";
+    }
+
+    /* Queue incidents */
+    for (const auto& v : violations) {
+        QueueClipboardIncident(clip_content, v, action_str);
+    }
+
+    auto elapsed = std::chrono::steady_clock::now() - start_time;
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    LOG_INFO("DetectionPipeline: [CLIP_{}] violations={} elapsed={}ms",
+             action_str, violations.size(), ms);
+}
+
+/* ================================================================== */
+/*  Clipboard incident queuing                                         */
+/* ================================================================== */
+
+void DetectionPipeline::QueueClipboardIncident(
+    const ClipboardContent& clip_content,
+    const PolicyViolation& violation,
+    const std::string& action_taken)
+{
+    if (!incident_queue_) return;
+
+    QueuedIncident qi;
+    qi.policy_name = violation.policy_name;
+    qi.severity = SeverityToString(violation.severity);
+    qi.channel = "clipboard";
+    qi.source_type = "endpoint";
+    qi.file_name = "clipboard";
+    qi.file_path = "clipboard (source: " + clip_content.source_process
+                 + ", pid: " + std::to_string(clip_content.source_pid) + ")";
+    qi.user = "";
+    qi.match_count = violation.match_count;
+    qi.action_taken = action_taken;
+
+    /* Build matched content JSON */
+    std::string matches_json = "{\"matches\":[";
+    for (size_t i = 0; i < violation.matches.size() && i < 10; ++i) {
+        if (i > 0) matches_json += ",";
+        matches_json += "{\"type\":\"" + violation.matches[i].analyzer_name + "\","
+                        "\"label\":\"" + violation.matches[i].label + "\","
+                        "\"count\":1}";
+    }
+    matches_json += "]}";
+    qi.matched_content = matches_json;
+
+    if (incident_queue_->Enqueue(qi)) {
+        LOG_DEBUG("DetectionPipeline: clipboard incident queued for policy '{}'", violation.policy_name);
+    } else {
+        LOG_DEBUG("DetectionPipeline: clipboard incident not queued (duplicate or full)");
+    }
+}
+
+/* ================================================================== */
+/*  Browser upload handler (P4-T11)                                    */
+/* ================================================================== */
+
+void DetectionPipeline::OnBrowserUpload(const BrowserUploadEvent& event)
+{
+    if (!running_) return;
+
+    auto start_time = std::chrono::steady_clock::now();
+
+    LOG_INFO("DetectionPipeline: [UPLOAD_SCAN] browser='{}' pid={} file={} size={}",
+             event.browser_name, event.browser_pid,
+             event.file_path, event.file_size);
+
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.browser_uploads_scanned++;
+    }
+
+    /* Skip if no policies loaded */
+    {
+        std::lock_guard<std::mutex> lock(policy_mutex_);
+        if (policies_.empty()) {
+            LOG_DEBUG("DetectionPipeline: [UPLOAD_ALLOW] no policies loaded");
+            return;
+        }
+    }
+
+    /* Read file content for scanning */
+    std::vector<uint8_t> content;
+    {
+        std::wstring wide_path(event.file_path.begin(), event.file_path.end());
+        HANDLE hFile = CreateFileW(wide_path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            LARGE_INTEGER fsize;
+            if (GetFileSizeEx(hFile, &fsize) && fsize.QuadPart > 0) {
+                auto read_size = static_cast<size_t>(
+                    (std::min)(static_cast<int64_t>(fsize.QuadPart),
+                               detection_config_.max_scan_size));
+                content.resize(read_size);
+                DWORD bytes_read = 0;
+                if (!ReadFile(hFile, content.data(),
+                              static_cast<DWORD>(read_size), &bytes_read, nullptr)) {
+                    content.clear();
+                }
+                else {
+                    content.resize(bytes_read);
+                }
+            }
+            CloseHandle(hFile);
+        }
+    }
+
+    if (content.empty()) {
+        LOG_DEBUG("DetectionPipeline: [UPLOAD_ALLOW] could not read file: {}", event.file_path);
+        return;
+    }
+
+    /* Run detection */
+    DetectionResult detection;
+    try {
+        detection = RunDetection(
+            content.data(), content.size(),
+            event.file_path, event.file_size);
+    } catch (const std::exception& ex) {
+        LOG_ERROR("DetectionPipeline: browser upload detection failed: {}", ex.what());
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.errors++;
+        return;
+    }
+
+    /* Evaluate policies */
+    std::vector<PolicyViolation> violations;
+    {
+        std::lock_guard<std::mutex> lock(policy_mutex_);
+        violations = policy_evaluator_.EvaluateAll(policies_, detection);
+    }
+
+    if (violations.empty()) {
+        return;
+    }
+
+    /* Find worst violation */
+    const PolicyViolation* worst = &violations[0];
+    for (size_t i = 1; i < violations.size(); ++i) {
+        if (violations[i].severity > worst->severity) {
+            worst = &violations[i];
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.browser_uploads_violations += violations.size();
+    }
+
+    std::string match_summary = std::to_string(worst->match_count) + " match(es)";
+    std::string file_desc = event.file_path + " (via " + event.browser_name + ")";
+
+    LOG_INFO("DetectionPipeline: [UPLOAD_VIOLATION] policy='{}' severity={} matches={} browser='{}' file={}",
+             worst->policy_name, SeverityToString(worst->severity),
+             worst->match_count, event.browser_name, event.file_path);
+
+    /* Determine response */
+    std::string action_str;
+
+    if (worst->response == ResponseAction::Block) {
+        action_str = "browser_upload_block";
+
+        {
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            stats_.browser_uploads_blocked++;
+        }
+
+        LOG_WARN("DetectionPipeline: [UPLOAD_BLOCK] sensitive file upload detected - "
+                 "policy='{}' browser='{}' file={}",
+                 worst->policy_name, event.browser_name, event.file_path);
+
+        /* Show block notification */
+        notifier_.ShowBlockNotification(
+            worst->policy_name,
+            SeverityToString(worst->severity),
+            file_desc,
+            match_summary,
+            "");
+
+    } else if (worst->response == ResponseAction::UserCancel) {
+        auto uc_result = user_cancel_action_.ShowDialog(
+            worst->policy_name,
+            SeverityToString(worst->severity),
+            file_desc,
+            match_summary);
+
+        if (uc_result.verdict == DriverMsgType::VerdictBlock) {
+            action_str = "browser_upload_user_cancel_block";
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                stats_.browser_uploads_blocked++;
+            }
+        } else {
+            action_str = "browser_upload_user_cancel_allow (justification: "
+                       + uc_result.justification + ")";
+        }
+
+    } else if (worst->response == ResponseAction::Notify) {
+        action_str = "browser_upload_notify";
+
+        notifier_.ShowNotifyNotification(
+            worst->policy_name,
+            SeverityToString(worst->severity),
+            file_desc,
+            match_summary);
+
+    } else {
+        action_str = "browser_upload_allow";
+    }
+
+    /* Queue incidents */
+    for (const auto& v : violations) {
+        if (!incident_queue_) continue;
+
+        /* Extract just the filename from the path */
+        std::string filename = event.file_path;
+        {
+            auto pos = filename.find_last_of("\\/");
+            if (pos != std::string::npos) {
+                filename = filename.substr(pos + 1);
+            }
+        }
+
+        QueuedIncident qi;
+        qi.policy_name = v.policy_name;
+        qi.severity = SeverityToString(v.severity);
+        qi.channel = "browser_upload";
+        qi.source_type = "endpoint";
+        qi.file_name = filename;
+        qi.file_path = event.file_path;
+        qi.user = event.browser_name + " (pid: " + std::to_string(event.browser_pid) + ")";
+        qi.match_count = v.match_count;
+        qi.action_taken = action_str;
+
+        std::string matches_json = "{\"matches\":[";
+        for (size_t i = 0; i < v.matches.size() && i < 10; ++i) {
+            if (i > 0) matches_json += ",";
+            matches_json += "{\"type\":\"" + v.matches[i].analyzer_name + "\","
+                            "\"label\":\"" + v.matches[i].label + "\","
+                            "\"count\":1}";
+        }
+        matches_json += "]}";
+        qi.matched_content = matches_json;
+
+        if (!incident_queue_->Enqueue(qi)) {
+            LOG_DEBUG("DetectionPipeline: browser upload incident not queued (duplicate or full)");
+        }
+    }
+
+    auto elapsed = std::chrono::steady_clock::now() - start_time;
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    LOG_INFO("DetectionPipeline: [UPLOAD_{}] violations={} elapsed={}ms",
+             action_str, violations.size(), ms);
+}
+
+/* ================================================================== */
+/*  Discover file handler (P7-T1)                                      */
+/* ================================================================== */
+
+void DetectionPipeline::OnDiscoverFile(const DiscoverFileEvent& event)
+{
+    if (!running_) return;
+
+    LOG_INFO("DetectionPipeline: [DISCOVER_SCAN] file={} size={} owner={}",
+             event.file_path, event.file_size, event.file_owner);
+
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.discover_files_scanned++;
+    }
+
+    /* Skip if no policies loaded */
+    {
+        std::lock_guard<std::mutex> lock(policy_mutex_);
+        if (policies_.empty()) {
+            LOG_DEBUG("DetectionPipeline: [DISCOVER_SKIP] no policies loaded");
+            return;
+        }
+    }
+
+    /* Read file content for scanning */
+    std::vector<uint8_t> content;
+    {
+#ifdef _WIN32
+        std::wstring wide_path(event.file_path.begin(), event.file_path.end());
+        HANDLE hFile = CreateFileW(wide_path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            LARGE_INTEGER fsize;
+            if (GetFileSizeEx(hFile, &fsize) && fsize.QuadPart > 0) {
+                auto read_size = static_cast<size_t>(
+                    (std::min)(static_cast<int64_t>(fsize.QuadPart),
+                               detection_config_.max_scan_size));
+                content.resize(read_size);
+                DWORD bytes_read = 0;
+                if (!ReadFile(hFile, content.data(),
+                              static_cast<DWORD>(read_size), &bytes_read, nullptr)) {
+                    content.clear();
+                } else {
+                    content.resize(bytes_read);
+                }
+            }
+            CloseHandle(hFile);
+        }
+#endif
+    }
+
+    if (content.empty()) {
+        LOG_DEBUG("DetectionPipeline: [DISCOVER_SKIP] could not read file: {}", event.file_path);
+        return;
+    }
+
+    /* Run detection */
+    DetectionResult detection;
+    try {
+        detection = RunDetection(
+            content.data(), content.size(),
+            event.file_path, event.file_size);
+    } catch (const std::exception& ex) {
+        LOG_ERROR("DetectionPipeline: discover detection failed: {}", ex.what());
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.errors++;
+        return;
+    }
+
+    /* Evaluate policies */
+    std::vector<PolicyViolation> violations;
+    {
+        std::lock_guard<std::mutex> lock(policy_mutex_);
+        violations = policy_evaluator_.EvaluateAll(policies_, detection);
+    }
+
+    if (violations.empty()) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.discover_violations += violations.size();
+        stats_.violations_detected += violations.size();
+    }
+
+    /* Find worst violation */
+    const PolicyViolation* worst = &violations[0];
+    for (size_t i = 1; i < violations.size(); ++i) {
+        if (violations[i].severity > worst->severity) {
+            worst = &violations[i];
+        }
+    }
+
+    LOG_WARN("DetectionPipeline: [DISCOVER_VIOLATION] policy='{}' severity={} matches={} "
+             "file={} owner={} modified={}",
+             worst->policy_name, SeverityToString(worst->severity),
+             worst->match_count, event.file_path, event.file_owner,
+             event.modification_date);
+
+    /* Quarantine the file if enabled (P7-T4) */
+    std::string action_str = "log";
+    if (quarantine_action_.IsEnabled()) {
+        std::string match_summary = std::to_string(worst->match_count) + " match(es)";
+        auto qr = quarantine_action_.Execute(
+            event.file_path, worst->policy_name,
+            SeverityToString(worst->severity),
+            match_summary, event.file_owner);
+        if (qr.success) {
+            action_str = "quarantine";
+            LOG_INFO("DetectionPipeline: [DISCOVER_QUARANTINE] file={} → {}",
+                     event.file_path, qr.quarantine_path);
+        } else {
+            LOG_WARN("DetectionPipeline: quarantine failed for {}: {}",
+                     event.file_path, qr.error);
+        }
+    }
+
+    /* Queue incidents */
+    for (const auto& v : violations) {
+        if (!incident_queue_) continue;
+
+        QueuedIncident qi;
+        qi.policy_name = v.policy_name;
+        qi.severity = SeverityToString(v.severity);
+        qi.channel = "discover";
+        qi.source_type = "discover";
+        qi.file_name = event.file_name;
+        qi.file_path = event.file_path;
+        qi.user = event.file_owner;
+        qi.match_count = v.match_count;
+        qi.action_taken = action_str;
+
+        std::string matches_json = "{\"matches\":[";
+        for (size_t i = 0; i < v.matches.size() && i < 10; ++i) {
+            if (i > 0) matches_json += ",";
+            matches_json += "{\"type\":\"" + v.matches[i].analyzer_name + "\","
+                            "\"label\":\"" + v.matches[i].label + "\","
+                            "\"count\":1}";
+        }
+        matches_json += "],\"file_owner\":\"" + event.file_owner + "\","
+                        "\"modification_date\":\"" + event.modification_date + "\"}";
+        qi.matched_content = matches_json;
+
+        if (!incident_queue_->Enqueue(qi)) {
+            LOG_DEBUG("DetectionPipeline: discover incident not queued (duplicate or full)");
+        }
+    }
+}
+
+/* ================================================================== */
+/*  Utility functions                                                  */
+/* ================================================================== */
+
+std::string DetectionPipeline::WideToUtf8(const std::wstring& wide) {
+    if (wide.empty()) return {};
+
+#ifdef _WIN32
+    int size = WideCharToMultiByte(CP_UTF8, 0, wide.data(),
+                                    static_cast<int>(wide.size()),
+                                    nullptr, 0, nullptr, nullptr);
+    if (size <= 0) return {};
+
+    std::string result(static_cast<size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.data(),
+                        static_cast<int>(wide.size()),
+                        &result[0], size, nullptr, nullptr);
+    return result;
+#else
+    /* Fallback: lossy conversion for non-Windows */
+    std::string result;
+    result.reserve(wide.size());
+    for (wchar_t ch : wide) {
+        if (ch < 128) {
+            result += static_cast<char>(ch);
+        } else {
+            result += '?';
+        }
+    }
+    return result;
+#endif
+}
+
+DriverMsgType DetectionPipeline::ActionToVerdict(ResponseAction action) {
+    switch (action) {
+        case ResponseAction::Block:
+            return DriverMsgType::VerdictBlock;
+        case ResponseAction::Allow:
+            return DriverMsgType::VerdictAllow;
+        case ResponseAction::Notify:
+            return DriverMsgType::VerdictAllow;  /* Notify doesn't block I/O */
+        case ResponseAction::UserCancel:
+            /* Handled in OnFileNotification before this is called */
+            return DriverMsgType::VerdictBlock;
+        case ResponseAction::TTD:
+            /* Should not reach here — handled in caller */
+            return DriverMsgType::VerdictAllow;
+        default:
+            return DriverMsgType::VerdictAllow;
+    }
+}
+
+std::string DetectionPipeline::SeverityToString(Severity severity) {
+    switch (severity) {
+        case Severity::Info:     return "INFO";
+        case Severity::Low:      return "LOW";
+        case Severity::Medium:   return "MEDIUM";
+        case Severity::High:     return "HIGH";
+        case Severity::Critical: return "CRITICAL";
+        default:                 return "UNKNOWN";
+    }
+}
+
+std::string DetectionPipeline::VolumeToChannel(VolumeType vol) {
+    switch (vol) {
+        case VolumeType::Removable: return "usb";
+        case VolumeType::Network:   return "network_share";
+        case VolumeType::Fixed:     return "endpoint";
+        default:                    return "endpoint";
+    }
+}
+
+}  // namespace akeso::dlp

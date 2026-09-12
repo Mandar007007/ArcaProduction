@@ -1,0 +1,721 @@
+# TASK: Get AkesoDLP fully running on this Windows machine for hands-on DLP testing
+
+You are working inside the cloned AkesoDLP repository.
+
+## My goal
+
+I do NOT want to develop or modify the DLP product architecture right now.
+
+I only want you to:
+
+1. Inspect the repository.
+2. Understand its documented build/run process.
+3. Install/build whatever is required on this Windows machine.
+4. Build the Windows endpoint agent and kernel driver.
+5. Start the backend infrastructure.
+6. Start the endpoint agent.
+7. Install/load the kernel minifilter correctly.
+8. Verify that all components communicate.
+9. Create a simple test environment.
+10. Leave the system in a state where I can manually test the existing DLP features.
+
+DO NOT add any AI functionality.
+DO NOT redesign the architecture.
+DO NOT replace existing Akeso components.
+DO NOT start implementing our future Maankix knowledge graph.
+DO NOT make unnecessary code changes.
+
+This is strictly a "make the existing AkesoDLP PoC run locally so I can test it" task.
+
+---
+
+# IMPORTANT WORKING RULES
+
+## Rule 1 — Inspect first
+
+Before changing anything, inspect:
+
+* README.md
+* REQUIREMENTS.md
+* LICENSE
+* docker-compose.yml
+* Makefile
+* scripts/
+* agent/
+* server/
+* console/
+* proto/
+* driver-related directories
+* build/install scripts
+* configuration files
+* environment/example files
+
+Understand how the repository expects to be built.
+
+Do NOT assume paths or executable names.
+
+Use the repository's own scripts/documentation wherever possible.
+
+---
+
+# Rule 2 — Windows machine
+
+This is a Windows development/test machine.
+
+Check the environment first.
+
+Run and report:
+
+```powershell
+git --version
+python --version
+node --version
+npm --version
+docker --version
+docker compose version
+cmake --version
+```
+
+Also detect:
+
+* Visual Studio 2022 installation
+* C++ Desktop workload
+* MSVC compiler
+* Windows SDK
+* Windows Driver Kit (WDK)
+* CMake
+* Ninja if required
+* PowerShell version
+* Windows version/build
+* whether PowerShell is running as Administrator
+
+Do NOT install unrelated software.
+
+If a required dependency is missing, determine the exact dependency from the repository documentation/build files first.
+
+---
+
+# Rule 3 — Do not blindly install things
+
+If something is missing:
+
+1. Identify exactly why it is required.
+2. Check whether it is already installed somewhere.
+3. Prefer the repository's documented installation mechanism.
+4. Tell me exactly what you are about to install/change.
+5. Then perform the installation if it can be done safely and locally.
+
+Do not install random packages just to make an error disappear.
+
+---
+
+# PHASE 1 — Repository inspection
+
+Create a short file:
+
+```text
+AKESO_BUILD_STATUS.md
+```
+
+with:
+
+```text
+Environment
+Dependencies
+Repository components
+Build commands discovered
+Run commands discovered
+Driver installation method
+Agent installation method
+Backend startup method
+Console startup method
+Current blockers
+```
+
+Do not write generic documentation. Record the actual commands discovered from this repository.
+
+---
+
+# PHASE 2 — Backend
+
+Get the backend/infrastructure running exactly according to the repository's documented process.
+
+If Docker Compose is the intended method, use it.
+
+For example, if appropriate after inspecting the repository:
+
+```powershell
+docker compose up -d
+```
+
+Then verify:
+
+```powershell
+docker compose ps
+```
+
+Check all required services.
+
+Inspect logs for failures:
+
+```powershell
+docker compose logs --tail=200
+```
+
+Do not consider the backend "working" just because containers are running.
+
+Actually verify the health/API endpoints documented by the repository.
+
+If the repository exposes an API health endpoint, call it.
+
+Record:
+
+```text
+Backend:
+PASS / FAIL
+
+Health endpoint:
+HTTP status:
+
+Required services:
+PASS / FAIL
+```
+
+---
+
+# PHASE 3 — Console
+
+Build/start the React console using the repository's documented method.
+
+Do not invent a new frontend setup.
+
+Verify that the console actually loads.
+
+If it runs on localhost, test the actual HTTP endpoint.
+
+Record:
+
+```text
+Console:
+PASS / FAIL
+
+URL:
+```
+
+---
+
+# PHASE 4 — Windows endpoint agent
+
+Now inspect the agent build system carefully.
+
+Determine:
+
+* language
+* build system
+* CMake requirements
+* required libraries
+* required Windows SDK
+* required WDK
+* required compiler
+* required generated protobuf files
+* configuration files
+* expected executable names
+
+Build the endpoint agent using the repository's intended commands.
+
+Use Release or Debug according to the repository's documented test instructions.
+
+After building, locate the actual generated binaries:
+
+```powershell
+Get-ChildItem -Recurse -File
+```
+
+or an appropriately targeted search.
+
+Do not assume the binary name.
+
+Record the exact paths of:
+
+* endpoint agent executable
+* driver `.sys`
+* DLLs
+* configuration files
+* required certificates
+* installer/package if generated
+
+---
+
+# PHASE 5 — Kernel driver
+
+This is critical.
+
+The endpoint driver must actually be built and loaded.
+
+Determine from the repository:
+
+* exact driver project
+* `.sys` output
+* `.inf`
+* service name
+* minifilter name
+* altitude
+* signing requirements
+* installation script
+* test-signing requirements
+* required administrator privileges
+
+Build the driver.
+
+Then verify that a `.sys` actually exists.
+
+For example:
+
+```powershell
+Get-ChildItem -Recurse -Filter *.sys
+```
+
+Do NOT report success unless the `.sys` exists.
+
+---
+
+# PHASE 6 — Driver signing
+
+This is a DEVELOPMENT/TEST MACHINE.
+
+If the repository requires Windows test signing:
+
+* use the repository's signing scripts if provided
+* otherwise use the documented Windows development-driver signing mechanism
+* do not disable unrelated Windows security features
+* do not permanently weaken security beyond what is required for this test
+
+If test signing is required, explain exactly what was changed.
+
+If a reboot is required, tell me clearly.
+
+After reboot, continue automatically if possible.
+
+Verify signing state and verify the driver is accepted by Windows.
+
+---
+
+# PHASE 7 — Install/load driver
+
+Install the driver using the repository's documented mechanism.
+
+Do NOT invent a different driver service if an INF/setup script already exists.
+
+After installation, verify it.
+
+Use appropriate Windows tools such as:
+
+```powershell
+sc.exe query <service>
+```
+
+and for minifilters:
+
+```powershell
+fltmc
+```
+
+and:
+
+```powershell
+fltmc instances
+```
+
+The driver must be visibly loaded.
+
+If the driver is not loaded:
+
+STOP.
+
+Diagnose the actual error.
+
+Do not continue pretending the endpoint is ready.
+
+---
+
+# PHASE 8 — Endpoint agent/service
+
+Start the Akeso endpoint agent/service using the repository's intended mechanism.
+
+First determine whether it is intended to run as:
+
+* Windows Service
+* foreground process
+* background process
+* tray application
+* combination of components
+
+Do not guess.
+
+Verify:
+
+```text
+Driver
+   ↓
+Endpoint Agent
+   ↓
+Backend
+```
+
+communication.
+
+Look at actual logs.
+
+If there is a driver communication port, verify that the agent connects successfully.
+
+If there is a gRPC/API connection to the backend, verify that connection too.
+
+Do not accept messages such as:
+
+```text
+started
+running
+```
+
+as proof of successful communication.
+
+We need actual evidence.
+
+---
+
+# PHASE 9 — Agent registration
+
+If Akeso requires endpoint registration/enrollment:
+
+* perform the registration according to the repository documentation
+* create a local test endpoint identity if required
+* verify that the endpoint appears in the management console
+
+The final desired state is:
+
+```text
+Akeso Endpoint
+      │
+      ├── Driver
+      │
+      └── Agent
+             │
+             ↓
+          Backend
+             │
+             ↓
+          Console
+```
+
+And the console should show the test endpoint as online/healthy if the repository supports this.
+
+---
+
+# PHASE 10 — Configure a simple test policy
+
+Do NOT create complicated enterprise policies.
+
+Create the smallest possible test policy that demonstrates the existing DLP functionality.
+
+Use dummy test data only.
+
+Prefer a policy that detects something already supported by Akeso, such as a test sensitive-data identifier.
+
+For example, create:
+
+```text
+C:\AkesoDLP-Test\
+```
+
+and create test files there.
+
+Do not use real personal/company confidential information.
+
+---
+
+# PHASE 11 — Test FILE / USB protection
+
+If the repository supports removable-media DLP, configure the simplest policy that blocks a sensitive test file from being written to a removable drive.
+
+Create a dummy test file.
+
+For example:
+
+```text
+C:\AkesoDLP-Test\test-sensitive.txt
+```
+
+Use only fake/test sensitive information.
+
+Insert a test USB drive.
+
+Attempt:
+
+```text
+C:\AkesoDLP-Test\test-sensitive.txt
+        ↓
+USB
+```
+
+Verify the actual result.
+
+We need evidence of:
+
+```text
+File operation
+    ↓
+Kernel driver
+    ↓
+Agent
+    ↓
+Detection
+    ↓
+Policy
+    ↓
+BLOCK
+```
+
+Record the result in:
+
+```text
+AKESO_TEST_RESULTS.md
+```
+
+---
+
+# PHASE 12 — Clipboard test
+
+If clipboard DLP is supported and documented:
+
+1. Create dummy sensitive test content.
+2. Copy it to clipboard.
+3. Attempt to paste it somewhere.
+4. Verify whether the policy blocks it.
+5. Check the agent/backend/console logs.
+
+Record the result.
+
+---
+
+# PHASE 13 — Browser upload test
+
+If browser upload DLP is supported:
+
+1. Use dummy sensitive test data.
+2. Start with a local/test endpoint if possible.
+3. Attempt an upload.
+4. Verify interception.
+5. Verify policy result.
+6. Verify incident/event creation.
+
+Do not upload real confidential data to external websites.
+
+---
+
+# PHASE 14 — Network share test
+
+If supported:
+
+Create/use a local test network share.
+
+Attempt to write a sensitive test file.
+
+Verify:
+
+```text
+write
+ ↓
+driver
+ ↓
+agent
+ ↓
+policy
+ ↓
+BLOCK
+```
+
+Record the result.
+
+---
+
+# PHASE 15 — Endpoint Discover
+
+If Endpoint Discover is available:
+
+Create a test directory:
+
+```text
+C:\AkesoDLP-Test\
+```
+
+with:
+
+```text
+normal.txt
+test-sensitive.txt
+test-document.pdf
+test-document.docx
+```
+
+Use fake sensitive information only.
+
+Run the repository's documented discovery scan.
+
+Verify the results in the console.
+
+---
+
+# PHASE 16 — DO NOT MODIFY THE CORE PRODUCT
+
+Unless absolutely necessary to make the documented build/run process work:
+
+DO NOT modify:
+
+* kernel driver logic
+* DLP detection algorithms
+* policy engine
+* backend architecture
+* frontend architecture
+* protobuf contracts
+* event schemas
+* interception logic
+
+If something fails because the repository itself contains a bug, do NOT silently redesign it.
+
+Instead:
+
+1. Identify the failure.
+2. Capture the error.
+3. Determine the smallest possible fix.
+4. Apply only that fix.
+5. Clearly document the change.
+
+---
+
+# PHASE 17 — Final verification
+
+When finished, produce:
+
+```text
+AKESO_TEST_RESULTS.md
+```
+
+with this exact structure:
+
+# AkesoDLP Local Test Results
+
+## Environment
+
+Windows:
+Visual Studio:
+WDK:
+Python:
+Node:
+Docker:
+CMake:
+
+## Backend
+
+Status:
+URL:
+Health check:
+
+## Console
+
+Status:
+URL:
+
+## Driver
+
+Driver:
+SYS path:
+Service:
+Minifilter:
+Loaded:
+Attached:
+
+## Endpoint Agent
+
+Executable:
+Status:
+Backend connected:
+Driver connected:
+
+## Endpoint Registration
+
+Status:
+
+## Tests
+
+### File → USB
+
+Result:
+Evidence:
+
+### Clipboard
+
+Result:
+Evidence:
+
+### Browser Upload
+
+Result:
+Evidence:
+
+### Network Share
+
+Result:
+Evidence:
+
+### Endpoint Discover
+
+Result:
+Evidence:
+
+## Blockers
+
+List only real blockers.
+
+## Files Modified
+
+List every file modified by you.
+
+---
+
+# VERY IMPORTANT FINAL RESPONSE
+
+When you finish, DO NOT give me a giant explanation.
+
+Give me only:
+
+1. Whether Akeso is running.
+2. Backend URL.
+3. Console URL.
+4. Driver status.
+5. Agent status.
+6. Which DLP tests passed.
+7. Which tests failed.
+8. Exact commands I can use to start/stop everything.
+9. Any reboot/admin action I still need to perform.
+
+If everything works, explicitly tell me:
+
+```text
+AKESO TEST ENVIRONMENT READY
+```
+
+Then stop.
+
+---
+
+# PRINCIPLE
+
+The objective is NOT to improve Akeso.
+
+The objective is:
+
+> Make the existing AkesoDLP PoC actually run on this Windows machine so I can manually test its existing endpoint DLP capabilities.
+
+Once this is working, I will separately give you the AI/knowledge-graph use case we want to build on top.
+
+Do not start that work yet.

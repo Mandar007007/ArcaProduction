@@ -1,0 +1,104 @@
+/**
+ * AkesoDLP Console — root application component.
+ *
+ * Routes:
+ *   /login  — Login page (public)
+ *   /mfa    — MFA verification (public, requires challenge token)
+ *   /       — Dashboard (protected)
+ *   /incidents — Incidents list (protected)
+ *   /policies  — Policy list (protected)
+ *   /detection — Detection test (protected)
+ *   /identifiers — Data identifiers (protected)
+ *   /users  — User management (protected)
+ *   /settings/network — Network monitor settings (protected)
+ *   /reports — Report generation and export (protected)
+ *   /risk — User risk scores (protected)
+ *   /fingerprints — Document fingerprint management (protected)
+ */
+
+import { useEffect, useState } from 'react';
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+
+import AuthGuard from './components/AuthGuard';
+import CommandPalette from './components/CommandPalette';
+import Layout from './components/Layout';
+import Agents from './pages/Agents';
+import AgentDetail from './pages/AgentDetail';
+import Dashboard from './pages/Dashboard';
+import Discovers from './pages/Discovers';
+import Fingerprints from './pages/Fingerprints';
+import Incidents from './pages/Incidents';
+import IncidentSnapshot from './pages/IncidentSnapshot';
+import Login from './pages/Login';
+import MFAVerify from './pages/MFAVerify';
+import NetworkSettings from './pages/NetworkSettings';
+import Reports from './pages/Reports';
+import UserRisk from './pages/UserRisk';
+import Policies from './pages/Policies';
+import PolicyEditor from './pages/PolicyEditor';
+import Identifiers from './pages/settings/Identifiers';
+import Dictionaries from './pages/settings/Dictionaries';
+import ResponseRules from './pages/settings/ResponseRules';
+import Users from './pages/settings/Users';
+import DeadLetterQueue from './pages/settings/DeadLetterQueue';
+
+function ProtectedLayout() {
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+
+  // Cmd+Shift+P / Ctrl+Shift+P
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'P') {
+        e.preventDefault();
+        setCommandPaletteOpen((prev) => !prev);
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  return (
+    <AuthGuard>
+      <Layout />
+      <CommandPalette
+        open={commandPaletteOpen}
+        onClose={() => setCommandPaletteOpen(false)}
+      />
+    </AuthGuard>
+  );
+}
+
+function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        {/* Public routes */}
+        <Route path="/login" element={<Login />} />
+        <Route path="/mfa" element={<MFAVerify />} />
+
+        {/* Protected routes — Layout renders <Outlet> for child pages */}
+        <Route element={<ProtectedLayout />}>
+          <Route index element={<Dashboard />} />
+          <Route path="incidents" element={<Incidents />} />
+          <Route path="incidents/:id" element={<IncidentSnapshot />} />
+          <Route path="agents" element={<Agents />} />
+          <Route path="agents/:id" element={<AgentDetail />} />
+          <Route path="discovers" element={<Discovers />} />
+          <Route path="policies" element={<Policies />} />
+          <Route path="policies/:id" element={<PolicyEditor />} />
+          <Route path="identifiers" element={<Identifiers />} />
+          <Route path="dictionaries" element={<Dictionaries />} />
+          <Route path="response-rules" element={<ResponseRules />} />
+          <Route path="users" element={<Users />} />
+          <Route path="reports" element={<Reports />} />
+          <Route path="risk" element={<UserRisk />} />
+          <Route path="fingerprints" element={<Fingerprints />} />
+          <Route path="settings/network" element={<NetworkSettings />} />
+          <Route path="settings/dlq" element={<DeadLetterQueue />} />
+        </Route>
+      </Routes>
+    </BrowserRouter>
+  );
+}
+
+export default App;

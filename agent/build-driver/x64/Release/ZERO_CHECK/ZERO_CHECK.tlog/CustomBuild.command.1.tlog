@@ -1,0 +1,10 @@
+^C:\XLMPROJECTS\ARCA\AGENT\BUILD-DRIVER\CMAKEFILES\60D057C3A9A727AB020F2249B33A17A9\GENERATE.STAMP.RULE
+setlocal
+C:\Users\MandarParekh\AppData\Local\Microsoft\WinGet\Packages\Kitware.CMake_Microsoft.Winget.Source_8wekyb3d8bbwe\cmake-4.4.3-windows-x86_64\bin\cmake.exe -SC:/xlmProjects/Arca/agent -BC:/xlmProjects/Arca/agent/build-driver --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/xlmProjects/Arca/agent/build-driver/AkesoDLPAgent.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

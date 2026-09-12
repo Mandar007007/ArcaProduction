@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\xlmProjects\Arca\agent\build-driver\CMakeFiles\60d057c3a9a727ab020f2249b33a17a9\INSTALL_force.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{D64DB0C6-7C79-3A6B-B97F-4180217366E5}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
